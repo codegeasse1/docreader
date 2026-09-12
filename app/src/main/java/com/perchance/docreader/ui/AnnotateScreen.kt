@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.perchance.docreader.ui
 
 import android.graphics.Bitmap

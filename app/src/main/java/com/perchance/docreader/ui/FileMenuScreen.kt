@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -275,7 +277,11 @@ fun FileMenuScreen(
                 Spacer(Modifier.height(18.dp))
                 HorizontalDivider()
 
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState()),
+                ) {
                     MenuRow(Icons.Filled.Add, "Merge Documents") { mergePick.launch(arrayOf("application/pdf")) }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     MenuRow(Icons.Filled.ContentCut, "Split Document") { dialog = "split" }
@@ -477,7 +483,7 @@ private fun SplitDialog(
 }
 
 @Composable
-private fun CompressDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun CompressDialog(onConfirm: (Int) -> Unit, onDismiss: () -> Unit) {
     val options = listOf("Balanced (1400 px, JPEG 72)", "Smallest file")
     var choice by remember { mutableStateOf(0) }
     AlertDialog(
@@ -495,7 +501,7 @@ private fun CompressDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onConfirm) { Text("Compress") } },
+        confirmButton = { TextButton(onClick = { onConfirm(choice) }) { Text("Compress") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

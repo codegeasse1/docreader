@@ -597,7 +597,7 @@ object PdfOps {
                     ann.setRectangle(rect)
                     ann.setColor(rgb(o.color))
                     if (o.kind != AnnKind.TEXT) ann.setConstantOpacity(0.4f)
-                    page.cosObject.addItem(COSName.ANNOTS, ann.cosObject)
+                    page.annotations.add(ann)
                     runCatching { ann.constructAppearances(doc) }
                     written++
                 }
@@ -722,7 +722,7 @@ object PdfOps {
                         org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder(digestProvider)
                             .build(contentSigner, holder)
                     generator.addSignerInfoGenerator(signerInfo)
-                    generator.addCertificates(org.bouncycastle.cms.jcajce.JcaCertStore(listOf(holder)))
+                    generator.addCertificates(org.bouncycastle.cert.jcajce.JcaCertStore(listOf(holder)))
                     val signed = generator.generate(
                         org.bouncycastle.cms.CMSProcessableByteArray(content.readBytes()),
                         false,
