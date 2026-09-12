@@ -1,10 +1,39 @@
 # DocReader
 
+[![Build APK](https://github.com/codegeasse1/docreader/actions/workflows/build-apk.yml/badge.svg)](https://github.com/codegeasse1/docreader/actions/workflows/build-apk.yml)
+
 A WPS-Office-style document reader for Android — PDF viewing built on Android's
 own `PdfRenderer`, so there is **no third-party PDF library and no native build**.
 
 This is a scaffold generated in a Perchance workspace where no Android SDK is
-available, so **it has not been compiled yet**. Build it locally in Android Studio.
+available, so **it has not been compiled there**. It **is** compiled
+automatically on every push by GitHub Actions.
+
+## Download the APK (no local build needed)
+
+1. Open the **Actions** tab: <https://github.com/codegeasse1/docreader/actions>
+2. Pick the newest **Build APK** run (a green check means it built).
+3. Scroll to **Artifacts** and download **`docreader-debug-apk`**.
+4. Unzip it — inside is `app-debug.apk`. Install it on your phone
+   (enable "Install unknown apps" for your browser/file manager).
+
+To get a proper **Release** page with the APK attached, push a version tag:
+
+```bash
+git tag v1.0 && git push origin v1.0
+```
+
+The workflow then attaches the APK to a GitHub Release automatically.
+
+## Roadmap
+
+- [x] **Easy** — PDF view, zoom, page counter, recent files, starred files
+- [ ] **Easy** — page thumbnails, bookmarks, in-document text search
+- [ ] **Medium** — annotate (text box, pen, highlight, underline, strike), annotation list
+- [ ] **Medium** — merge / split / rotate / delete / reorder pages (PDFBox-Android)
+- [ ] **Medium** — set/remove password, print
+- [ ] **Hard** — fill AcroForm fields, digital signature, compress
+- [ ] **Hard** — PDF → Word/Excel conversion (likely server-side)
 
 ## What's implemented
 
