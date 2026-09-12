@@ -35,6 +35,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.OutputStream
 import java.util.Calendar
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -139,9 +140,24 @@ object PdfOps {
      */
     fun createFromImages(ctx: Context, images: List<Uri>, dest: Uri, maxDimension: Int = 2400): Int {
         if (images.isEmpty()) error("Pick at least one image")
+        return createFromItems(ctx, images, dest, maxDimension)
+    }
+
+    /**
+     * Builds a new PDF from a mixed page list: a `null` entry becomes a blank A4 page, any other
+     * entry is treated as an image and becomes its own page. This is what the "New PDF" builder
+     * uses, so a document can mix photos, scans and blank pages. Returns the page count.
+     */
+    fun createFromItems(ctx: Context, items: List<Uri?>, dest: Uri, maxDimension: Int = 2400): Int {
+        if (items.isEmpty()) error("Add at least one page")
         var pages = 0
         PDDocument().use { doc ->
-            for ((i, u) in images.withIndex()) {
+            for ((i, u) in items.withIndex()) {
+                if (u == null) {
+                    doc.addPage(PDPage(PDRectangle.A4))
+                    pages++
+                    continue
+                }
                 val raw = decodeScaled(ctx, u, maxDimension) ?: continue
                 val bmp = flattenOnWhite(raw)
                 val img = PDImageXObject.createFromByteArray(doc, jpegBytes(bmp, 88), "img$i")
@@ -156,7 +172,7 @@ object PdfOps {
                 if (bmp !== raw) raw.recycle()
                 pages++
             }
-            if (pages == 0) error("None of the chosen images could be read")
+            if (pages == 0) error("None of the chosen pages could be read")
             outStream(ctx, dest).use { doc.save(it) }
         }
         return pages
@@ -630,7 +646,8 @@ object PdfOps {
                     when (o.kind) {
                         AnnKind.TEXT -> {
                             ann.cosObject.setName(COSName.SUBTYPE, PDAnnotationMarkup.SUB_TYPE_FREETEXT)
-                            ann.setDefaultAppearance("/Helv 12 Tf 0 g")
+                            val textSize = (o.fontSize * box.height).coerceIn(4f, 96f)
+                            ann.setDefaultAppearance("/Helv ${String.format(Locale.US, "%.1f", textSize)} Tf 0 g")
                             ann.setContents(o.text)
                         }
 

@@ -58,6 +58,7 @@ import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Draw a signature, then apply a real detached CMS signature with a self-signed certificate. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -80,11 +81,15 @@ fun SignScreen(
         var stampVisible by remember { mutableStateOf(true) }
         var busy by remember { mutableStateOf<String?>(null) }
         var resultText by remember { mutableStateOf<String?>(null) }
+        var certNote by remember { mutableStateOf<String?>(null) }
+        val pendingResult = remember { mutableStateOf<File?>(null) }
 
-        val save = rememberCreateDocument("application/pdf") { dest ->
+        fun signNow() {
             scope.launch {
                 busy = "Signing…"
-                val page = ((pageText.toIntOrNull() ?: 1) - 1).coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
+                val out = File.createTempFile("docreader_signed_", ".pdf", context.cacheDir)
+                val page = ((pageText.toIntOrNull() ?: 1) - 1)
+                    .coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
                 val stamp: Bitmap? = if (stampVisible && strokes.isNotEmpty()) renderSignature(strokes) else null
                 val rect = if (stamp != null) floatArrayOf(0.55f, 0.80f, 0.95f, 0.94f) else null
                 val outcome = withContext(Dispatchers.IO) {
@@ -93,7 +98,7 @@ fun SignScreen(
                             ctx = context,
                             uri = Uri.parse(uri),
                             password = password,
-                            dest = dest,
+                            dest = Uri.fromFile(out),
                             signerName = signer.ifBlank { "DocReader User" },
                             reason = reason,
                             location = location,
@@ -104,7 +109,13 @@ fun SignScreen(
                     }
                 }
                 busy = null
-                resultText = outcome.getOrElse { "Signing failed: ${it.message}" }
+                outcome.onSuccess { description ->
+                    certNote = description
+                    pendingResult.value = out
+                }.onFailure {
+                    runCatching { out.delete() }
+                    resultText = "Signing failed: ${it.message}"
+                }
             }
         }
 
@@ -118,10 +129,8 @@ fun SignScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            save.launch(name.replace(".pdf", "", ignoreCase = true) + "_signed.pdf")
-                        }) {
-                            Icon(Icons.Filled.Save, contentDescription = "Sign and save")
+                        IconButton(onClick = { signNow() }) {
+                            Icon(Icons.Filled.Save, contentDescription = "Sign and preview")
                         }
                     },
                 )
@@ -216,12 +225,10 @@ fun SignScreen(
                         Text("Draw the visible signature onto the page")
                     }
                     Spacer(Modifier.height(16.dp))
-                    TextButton(onClick = {
-                        save.launch(name.replace(".pdf", "", ignoreCase = true) + "_signed.pdf")
-                    }) {
+                    TextButton(onClick = { signNow() }) {
                         Icon(Icons.Filled.Save, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
-                        Text("Sign & save copy")
+                        Text("Sign & preview")
                     }
                     Spacer(Modifier.height(24.dp))
                 }
@@ -235,6 +242,19 @@ fun SignScreen(
                 title = { Text("Signature added") },
                 text = { Text(text) },
                 confirmButton = { TextButton(onClick = { resultText = null }) { Text("Done") } },
+            )
+        }
+
+        pendingResult.value?.let { result ->
+            ResultPreview(
+                file = result,
+                title = "Signed PDF",
+                suggestedName = name.replace(".pdf", "", ignoreCase = true) + "_signed.pdf",
+                note = certNote,
+                onDiscard = {
+                    runCatching { result.delete() }
+                    pendingResult.value = null
+                },
             )
         }
     }

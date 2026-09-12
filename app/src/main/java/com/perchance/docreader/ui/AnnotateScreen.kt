@@ -75,12 +75,15 @@ import androidx.compose.ui.unit.sp
 import com.perchance.docreader.data.AnnotationStore
 import com.perchance.docreader.pdf.ANNOTATION_COLORS
 import com.perchance.docreader.pdf.AnnKind
+import com.perchance.docreader.pdf.MAX_TEXT_SIZE
+import com.perchance.docreader.pdf.MIN_TEXT_SIZE
 import com.perchance.docreader.pdf.Overlay
 import com.perchance.docreader.pdf.PdfDocumentHandle
 import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.abs
 
 private enum class AnnTool { MOVE, TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT }
@@ -116,9 +119,11 @@ fun AnnotateScreen(
         var tool by remember { mutableStateOf(AnnTool.PEN) }
         var color by remember { mutableStateOf(ANNOTATION_COLORS.first()) }
         var width by remember { mutableStateOf(0.02f) }
+        var textSize by remember { mutableStateOf(0.06f) }
         var pendingText by remember { mutableStateOf<Offset?>(null) }
         var editing by remember { mutableStateOf<Overlay?>(null) }
         var busy by remember { mutableStateOf<String?>(null) }
+        val pendingResult = remember { mutableStateOf<File?>(null) }
 
         val page = pagerState.currentPage
 
@@ -137,18 +142,26 @@ fun AnnotateScreen(
             reloadKey++
         }
 
-        val export = rememberCreateDocument("application/pdf") { dest ->
+        fun exportPdf() {
             scope.launch {
                 busy = "Writing annotations…"
+                val out = File.createTempFile("docreader_annotated_", ".pdf", context.cacheDir)
                 val written = withContext(Dispatchers.IO) {
                     runCatching {
-                        PdfOps.writeAnnotations(context, Uri.parse(uri), annStore.list(uri), password, dest)
+                        PdfOps.writeAnnotations(
+                            context,
+                            Uri.parse(uri),
+                            annStore.list(uri),
+                            password,
+                            Uri.fromFile(out),
+                        )
                     }.getOrDefault(-1)
                 }
                 busy = null
-                if (written >= 0) {
-                    annStore.clear(uri)
-                    reloadKey++
+                if (written >= 0 && out.length() > 0L) {
+                    pendingResult.value = out
+                } else {
+                    runCatching { out.delete() }
                 }
             }
         }
@@ -167,9 +180,7 @@ fun AnnotateScreen(
                         IconButton(onClick = { overlays.lastOrNull()?.let { delete(it.id) } }) {
                             Icon(Icons.Filled.Undo, contentDescription = "Undo")
                         }
-                        IconButton(onClick = {
-                            export.launch(name.replace(".pdf", "", ignoreCase = true) + "_annotated.pdf")
-                        }) {
+                        IconButton(onClick = { exportPdf() }) {
                             Icon(Icons.Filled.Save, contentDescription = "Save as PDF")
                         }
                         IconButton(onClick = { annStore.clear(uri); reloadKey++ }) {
@@ -204,6 +215,34 @@ fun AnnotateScreen(
                                         shape = CircleShape,
                                     )
                                     .clickable { color = c },
+                            )
+                        }
+                    }
+                    if (tool == AnnTool.TEXT) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Text size", color = Color.White, fontSize = 12.sp)
+                            Spacer(Modifier.width(10.dp))
+                            StepButton("A-") {
+                                textSize = (textSize / 1.25f).coerceAtLeast(MIN_TEXT_SIZE)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            StepButton("A+") {
+                                textSize = (textSize * 1.25f).coerceAtMost(MAX_TEXT_SIZE)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            StepButton("Reset") { textSize = 0.06f }
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "Pinch a note with two fingers to resize its box and text",
+                                color = Color(0x99FFFFFF),
+                                fontSize = 11.sp,
                             )
                         }
                     }
@@ -247,8 +286,10 @@ fun AnnotateScreen(
                 title = "Add note",
                 initial = "",
                 onSave = { text ->
-                    val x = point.x.coerceIn(0f, 0.55f)
-                    val y = point.y.coerceIn(0f, 0.9f)
+                    val x = point.x.coerceIn(0f, 0.6f)
+                    val y = point.y.coerceIn(0f, 0.88f)
+                    val w = 0.45f
+                    val h = (textSize * 2.6f).coerceIn(0.02f, 0.9f)
                     commit(
                         Overlay(
                             id = annStore.newId(),
@@ -258,9 +299,10 @@ fun AnnotateScreen(
                             width = width,
                             left = x,
                             top = y,
-                            right = (x + 0.4f).coerceAtMost(1f),
-                            bottom = (y + 0.08f).coerceAtMost(1f),
+                            right = (x + w).coerceAtMost(1f),
+                            bottom = (y + h).coerceAtMost(1f),
                             text = text,
+                            fontSize = textSize,
                         )
                     )
                     pendingText = null
@@ -282,6 +324,22 @@ fun AnnotateScreen(
                     editing = null
                 },
                 onDismiss = { editing = null },
+            )
+        }
+
+        pendingResult.value?.let { result ->
+            ResultPreview(
+                file = result,
+                title = "Annotated PDF",
+                suggestedName = name.replace(".pdf", "", ignoreCase = true) + "_annotated.pdf",
+                onSaved = {
+                    annStore.clear(uri)
+                    reloadKey++
+                },
+                onDiscard = {
+                    runCatching { result.delete() }
+                    pendingResult.value = null
+                },
             )
         }
     }
@@ -477,64 +535,107 @@ private fun DraggableTextNote(
     onDelete: () -> Unit,
 ) {
     val density = LocalDensity.current
-    var live by remember(note.id) { mutableStateOf<Offset?>(null) }
-    val leftNorm = live?.x ?: note.left
-    val topNorm = live?.y ?: note.top
-    val boxWidth = ((note.right - note.left) * pageWidthPx).coerceAtLeast(48f)
-    val boxHeight = ((note.bottom - note.top) * pageHeightPx).coerceAtLeast(32f)
-    val fontSize = with(density) { (boxHeight * 0.55f).toSp().value }.coerceIn(9f, 26f).sp
+    var live by remember(note.id) { mutableStateOf<Overlay?>(null) }
+    val shown = live ?: note
+    val widthNorm = (shown.right - shown.left).coerceAtLeast(0.02f)
+    val heightNorm = (shown.bottom - shown.top).coerceAtLeast(0.012f)
+    val boxWidth = (widthNorm * pageWidthPx).coerceAtLeast(32f)
+    val boxHeight = (heightNorm * pageHeightPx).coerceAtLeast(24f)
+    val fontSp = with(density) { (shown.fontSize * pageHeightPx).toSp().value }.coerceIn(7f, 90f)
+    val fontSize = fontSp.sp
 
     Box(
         modifier = Modifier
             .offset(
-                x = with(density) { (leftNorm * pageWidthPx).toDp() },
-                y = with(density) { (topNorm * pageHeightPx).toDp() },
+                x = with(density) { (shown.left * pageWidthPx).toDp() },
+                y = with(density) { (shown.top * pageHeightPx).toDp() },
             )
             .width(with(density) { boxWidth.toDp() })
             .height(with(density) { boxHeight.toDp() })
             .background(Color(note.color).copy(alpha = 0.16f), RoundedCornerShape(4.dp))
-            .border(1.dp, Color(note.color), RoundedCornerShape(4.dp))
+            .border(
+                width = if (live != null) 2.dp else 1.dp,
+                color = Color(note.color),
+                shape = RoundedCornerShape(4.dp),
+            )
             .pointerInput(note.id) {
+                val minWidth = 0.04f
+                val minHeight = 0.02f
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     down.consume()
-                    var last = down.position
+                    var current = note
                     var moved = false
+                    var resized = false
+                    var multi = false
+                    var last = down.position
                     while (true) {
                         val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (!change.pressed) {
-                            change.consume()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) {
+                            event.changes.forEach { it.consume() }
                             break
                         }
-                        val dx = change.position.x - last.x
-                        val dy = change.position.y - last.y
-                        if (abs(dx) + abs(dy) > 0f) {
-                            if (abs(dx) + abs(dy) > 2f) moved = true
-                            val cur = live ?: Offset(note.left, note.top)
-                            val maxX = (1f - (note.right - note.left)).coerceAtLeast(0f)
-                            val maxY = (1f - (note.bottom - note.top)).coerceAtLeast(0f)
-                            live = Offset(
-                                (cur.x + dx / pageWidthPx).coerceIn(0f, maxX),
-                                (cur.y + dy / pageHeightPx).coerceIn(0f, maxY),
-                            )
-                            last = change.position
+                        if (pressed.size >= 2) {
+                            // Two fingers: scale the note (box and text together) and pan it.
+                            multi = true
+                            val a = pressed[0]
+                            val b = pressed[1]
+                            val prevDist = (a.previousPosition - b.previousPosition).getDistance()
+                            val nowDist = (a.position - b.position).getDistance()
+                            val zoom = if (prevDist > 1f) (nowDist / prevDist).coerceIn(0.5f, 2f) else 1f
+                            val panX =
+                                ((a.position.x - a.previousPosition.x) + (b.position.x - b.previousPosition.x)) / 2f
+                            val panY =
+                                ((a.position.y - a.previousPosition.y) + (b.position.y - b.previousPosition.y)) / 2f
+                            if (zoom != 1f || panX != 0f || panY != 0f) {
+                                val w = ((current.right - current.left) * zoom).coerceIn(minWidth, 1f)
+                                val h = ((current.bottom - current.top) * zoom).coerceIn(minHeight, 1f)
+                                val left = (current.left + panX / pageWidthPx)
+                                    .coerceIn(0f, (1f - w).coerceAtLeast(0f))
+                                val top = (current.top + panY / pageHeightPx)
+                                    .coerceIn(0f, (1f - h).coerceAtLeast(0f))
+                                current = current.copy(
+                                    left = left,
+                                    top = top,
+                                    right = (left + w).coerceAtMost(1f),
+                                    bottom = (top + h).coerceAtMost(1f),
+                                    fontSize = (current.fontSize * zoom)
+                                        .coerceIn(MIN_TEXT_SIZE, MAX_TEXT_SIZE),
+                                )
+                                resized = true
+                                live = current
+                            }
+                            last = a.position
+                        } else {
+                            val change = pressed.firstOrNull { it.id == down.id } ?: pressed.first()
+                            if (multi) {
+                                multi = false
+                                last = change.position
+                            }
+                            val dx = change.position.x - last.x
+                            val dy = change.position.y - last.y
+                            if (abs(dx) + abs(dy) > 0f) {
+                                if (abs(dx) + abs(dy) > 2f) moved = true
+                                val maxX = (1f - (current.right - current.left)).coerceAtLeast(0f)
+                                val maxY = (1f - (current.bottom - current.top)).coerceAtLeast(0f)
+                                val left = (current.left + dx / pageWidthPx).coerceIn(0f, maxX)
+                                val top = (current.top + dy / pageHeightPx).coerceIn(0f, maxY)
+                                current = current.copy(
+                                    left = left,
+                                    top = top,
+                                    right = left + (current.right - current.left),
+                                    bottom = top + (current.bottom - current.top),
+                                )
+                                last = change.position
+                                live = current
+                            }
                         }
-                        change.consume()
+                        event.changes.forEach { it.consume() }
                     }
-                    val settled = live
-                    if (moved && settled != null) {
-                        val w = note.right - note.left
-                        val h = note.bottom - note.top
-                        onUpdate(
-                            note.copy(
-                                left = settled.x,
-                                top = settled.y,
-                                right = settled.x + w,
-                                bottom = settled.y + h,
-                            )
-                        )
-                    } else if (!moved) {
+                    if (moved || resized) {
+                        onUpdate(current)
+                    } else if (!resized) {
                         onEdit()
                     }
                     live = null
@@ -550,6 +651,18 @@ private fun DraggableTextNote(
             maxLines = 3,
             fontWeight = FontWeight.Medium,
         )
+    }
+}
+
+@Composable
+private fun StepButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .background(Color(0xFF3A3A3A), RoundedCornerShape(8.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(label, color = Color.White, fontSize = 13.sp)
     }
 }
 

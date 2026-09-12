@@ -48,6 +48,7 @@ import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Lists the document's AcroForm fields and lets the user fill them in, optionally flattening. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -65,7 +66,8 @@ fun FillFormScreen(
         var fields by remember(uri) { mutableStateOf<List<FormFieldInfo>?>(null) }
         var values by remember(uri) { mutableStateOf<Map<String, String>>(emptyMap()) }
         var busy by remember { mutableStateOf<String?>(null) }
-        var flattenNext by remember { mutableStateOf(false) }
+        val pendingResult = remember { mutableStateOf<File?>(null) }
+        var pendingSuggested by remember { mutableStateOf("") }
 
         LaunchedEffect(uri, password) {
             fields = withContext(Dispatchers.IO) {
@@ -73,16 +75,30 @@ fun FillFormScreen(
             }
         }
 
-        val save = rememberCreateDocument("application/pdf") { dest ->
+        fun produceFilled(flatten: Boolean) {
             scope.launch {
                 busy = "Saving form…"
+                val out = File.createTempFile("docreader_filled_", ".pdf", context.cacheDir)
                 val ok = withContext(Dispatchers.IO) {
                     runCatching {
-                        PdfOps.fillForm(context, Uri.parse(uri), values, password, dest, flattenNext)
+                        PdfOps.fillForm(
+                            context,
+                            Uri.parse(uri),
+                            values,
+                            password,
+                            Uri.fromFile(out),
+                            flatten,
+                        )
                     }.isSuccess
                 }
                 busy = null
-                snackbar.showSnackbar(if (ok) "Saved" else "Could not save")
+                if (ok && out.length() > 0L) {
+                    pendingSuggested = name.replace(".pdf", "", ignoreCase = true) +
+                        if (flatten) "_flattened.pdf" else "_filled.pdf"
+                    pendingResult.value = out
+                } else {
+                    snackbar.showSnackbar("Could not save")
+                }
             }
         }
 
@@ -97,11 +113,8 @@ fun FillFormScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            flattenNext = false
-                            save.launch(name.replace(".pdf", "", ignoreCase = true) + "_filled.pdf")
-                        }) {
-                            Icon(Icons.Filled.Save, contentDescription = "Save")
+                        IconButton(onClick = { produceFilled(false) }) {
+                            Icon(Icons.Filled.Save, contentDescription = "Preview & save")
                         }
                     },
                 )
@@ -129,19 +142,25 @@ fun FillFormScreen(
                                 .padding(16.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            TextButton(onClick = {
-                                flattenNext = false
-                                save.launch(name.replace(".pdf", "", ignoreCase = true) + "_filled.pdf")
-                            }) { Text("Save") }
-                            TextButton(onClick = {
-                                flattenNext = true
-                                save.launch(name.replace(".pdf", "", ignoreCase = true) + "_flattened.pdf")
-                            }) { Text("Save & flatten") }
+                            TextButton(onClick = { produceFilled(false) }) { Text("Preview") }
+                            TextButton(onClick = { produceFilled(true) }) { Text("Flatten & preview") }
                         }
                     }
                 }
                 BusyOverlay(busy)
             }
+        }
+
+        pendingResult.value?.let { result ->
+            ResultPreview(
+                file = result,
+                title = "Filled form",
+                suggestedName = pendingSuggested,
+                onDiscard = {
+                    runCatching { result.delete() }
+                    pendingResult.value = null
+                },
+            )
         }
     }
 }

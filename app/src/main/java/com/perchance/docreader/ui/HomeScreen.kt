@@ -8,6 +8,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +31,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -40,6 +43,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MergeType
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -102,6 +106,12 @@ private enum class SortMode { DATE, NAME, SIZE }
 /** What to do with the PDF the user is about to pick. */
 private enum class PickAction { OPEN, ANNOTATE, CONVERT, FILL_FORM, SIGN }
 
+/** One page of the "New PDF" builder: an image, or a blank A4 page. */
+private sealed interface NewPage {
+    data object Blank : NewPage
+    data class Image(val uri: Uri) : NewPage
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -125,12 +135,19 @@ fun HomeScreen(
     var busy by remember { mutableStateOf<String?>(null) }
     var infoFile by remember { mutableStateOf<RecentFile?>(null) }
     var convertTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var showNewPdf by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
 
     val pickAction = remember { mutableStateOf(PickAction.OPEN) }
-    val destAction = remember { mutableStateOf<((Uri) -> Unit)?>(null) }
     val scanPages = remember { mutableStateOf<List<Uri>>(emptyList()) }
     val captureUri = remember { mutableStateOf<Uri?>(null) }
+    val newPdfPages = remember { mutableStateOf<List<NewPage>>(listOf(NewPage.Blank)) }
+
+    // The last produced file, held in the cache until the user reviews and saves it.
+    val pendingResult = remember { mutableStateOf<File?>(null) }
+    var pendingTitle by remember { mutableStateOf("") }
+    var pendingSuggested by remember { mutableStateOf("") }
+    var pendingMime by remember { mutableStateOf("application/pdf") }
 
     fun notify(message: String) {
         scope.launch { snackbar.showSnackbar(message) }
@@ -150,22 +167,28 @@ fun HomeScreen(
         onOpen(uri.toString(), name)
     }
 
-    /** Runs [into] with the chosen destination, then opens the produced file. */
-    fun produce(into: (Uri) -> Unit) {
-        destAction.value = { dest ->
-            scope.launch {
-                busy = "Writing PDF…"
-                val ok = withContext(Dispatchers.IO) { runCatching { into(dest) }.isSuccess }
-                busy = null
-                if (ok) openCreated(dest) else notify("Could not create the PDF")
+    /** Runs [op] into a private cache file, then opens it in the result preview. */
+    fun produce(title: String, suggested: String, mime: String = "application/pdf", op: (Uri) -> Unit) {
+        scope.launch {
+            busy = "Writing file…"
+            val suffix = when (mime) {
+                "application/pdf" -> ".pdf"
+                "text/plain" -> ".txt"
+                else -> ".html"
+            }
+            val out = File.createTempFile("docreader_result_", suffix, context.cacheDir)
+            val ok = withContext(Dispatchers.IO) { runCatching { op(Uri.fromFile(out)) }.isSuccess }
+            busy = null
+            if (ok && out.length() > 0L) {
+                pendingTitle = title
+                pendingSuggested = suggested
+                pendingMime = mime
+                pendingResult.value = out
+            } else {
+                notify("Could not create the file")
             }
         }
     }
-
-    // The destination launchers are declared first because the picker callbacks below use them.
-    val createDest = rememberCreateDocument("application/pdf") { dest -> destAction.value?.invoke(dest) }
-    val txtDest = rememberCreateDocument("text/plain") { dest -> destAction.value?.invoke(dest) }
-    val htmlDest = rememberCreateDocument("text/html") { dest -> destAction.value?.invoke(dest) }
 
     // ---- pickers -------------------------------------------------------------------------
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -187,14 +210,20 @@ fun HomeScreen(
     }
     val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         if (uris.isNotEmpty()) {
-            produce { dest -> PdfOps.createFromImages(context, uris, dest) }
-            createDest.launch(timestampName("Photos"))
+            produce("Photos → PDF", timestampName("Photos")) { dest -> PdfOps.createFromImages(context, uris, dest) }
         }
     }
     val mergePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
-            produce { dest -> PdfOps.merge(context, uris, null, dest) }
-            createDest.launch(timestampName("Merged"))
+            produce("Merged PDF", timestampName("Merged")) { dest -> PdfOps.merge(context, uris, null, dest) }
+        }
+    }
+    val newPdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) {
+            val current = newPdfPages.value
+            // The starting blank page makes way for the images the first time images are added.
+            val base = if (current.size == 1 && current[0] == NewPage.Blank) emptyList() else current
+            newPdfPages.value = base + uris.map { NewPage.Image(it) }
         }
     }
     val scanGalleryPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
@@ -247,6 +276,7 @@ fun HomeScreen(
                 QuickActions(
                     onOpenFile = { pickAction.value = PickAction.OPEN; pick(PickAction.OPEN) },
                     onAnnotate = { pickAction.value = PickAction.ANNOTATE; pick(PickAction.ANNOTATE) },
+                    onMerge = { mergePicker.launch(arrayOf("application/pdf")) },
                     onConvert = { pickAction.value = PickAction.CONVERT; pick(PickAction.CONVERT) },
                     onFillForm = { pickAction.value = PickAction.FILL_FORM; pick(PickAction.FILL_FORM) },
                     onSign = { pickAction.value = PickAction.SIGN; pick(PickAction.SIGN) },
@@ -300,10 +330,10 @@ fun HomeScreen(
                 modifier = Modifier.padding(start = 20.dp, bottom = 10.dp),
             )
             SheetSection(title = "Create") {
-                SheetItem(Icons.Filled.PictureAsPdf, "Blank PDF") {
+                SheetItem(Icons.Filled.PictureAsPdf, "New PDF") {
                     showSheet = false
-                    produce { dest -> PdfOps.createBlank(context, dest) }
-                    createDest.launch(timestampName("Blank"))
+                    newPdfPages.value = listOf(NewPage.Blank)
+                    showNewPdf = true
                 }
                 SheetItem(Icons.Filled.CameraAlt, "Scan") {
                     showSheet = false
@@ -315,7 +345,7 @@ fun HomeScreen(
                     showSheet = false
                     photoPicker.launch("image/*")
                 }
-                SheetItem(Icons.Filled.Description, "Documents") {
+                SheetItem(Icons.Filled.MergeType, "Merge PDFs") {
                     showSheet = false
                     mergePicker.launch(arrayOf("application/pdf"))
                 }
@@ -356,8 +386,9 @@ fun HomeScreen(
                         notify("Capture at least one page first")
                     } else {
                         showScan = false
-                        produce { dest -> PdfOps.createFromImages(context, pages, dest) }
-                        createDest.launch(timestampName("Scan"))
+                        produce("Scan", timestampName("Scan")) { dest ->
+                            PdfOps.createFromImages(context, pages, dest)
+                        }
                         scanPages.value = emptyList()
                     }
                 },
@@ -366,29 +397,59 @@ fun HomeScreen(
         }
     }
 
+    // ---- new PDF builder ----------------------------------------------------------------
+    if (showNewPdf) {
+        ModalBottomSheet(onDismissRequest = { showNewPdf = false }, sheetState = sheetState) {
+            NewPdfSheet(
+                pages = newPdfPages.value,
+                onAddImages = { newPdfPicker.launch("image/*") },
+                onAddBlank = { newPdfPages.value = newPdfPages.value + NewPage.Blank },
+                onRemove = { index ->
+                    newPdfPages.value = newPdfPages.value.filterIndexed { i, _ -> i != index }
+                },
+                onMove = { from, to ->
+                    val list = newPdfPages.value.toMutableList()
+                    if (to in list.indices && from in list.indices) {
+                        val item = list.removeAt(from)
+                        list.add(to, item)
+                        newPdfPages.value = list
+                    }
+                },
+                onClear = { newPdfPages.value = emptyList() },
+                onCreate = {
+                    val pages = newPdfPages.value
+                    if (pages.isEmpty()) {
+                        notify("Add at least one page first")
+                    } else {
+                        showNewPdf = false
+                        produce("New PDF", timestampName("Document")) { dest ->
+                            PdfOps.createFromItems(context, pages.map { (it as? NewPage.Image)?.uri }, dest)
+                        }
+                    }
+                },
+                onDismiss = { showNewPdf = false },
+            )
+        }
+    }
+
     // ---- convert dialog ------------------------------------------------------------------
-    convertTarget?.let { (_, name) ->
+    convertTarget?.let { (_, targetName) ->
         ConvertDialog(
-            name = name,
+            name = targetName,
             onPick = { asHtml ->
                 val target = convertTarget
                 convertTarget = null
                 if (target != null) {
                     val (uriString, baseName) = target
-                    destAction.value = { dest ->
-                        scope.launch {
-                            busy = "Converting…"
-                            val ok = withContext(Dispatchers.IO) {
-                                runCatching {
-                                    PdfOps.exportText(context, Uri.parse(uriString), null, dest, asHtml)
-                                }.isSuccess
-                            }
-                            busy = null
-                            notify(if (ok) "Saved" else "Conversion failed")
-                        }
-                    }
                     val stem = baseName.substringBeforeLast('.')
-                    if (asHtml) htmlDest.launch("$stem.html") else txtDest.launch("$stem.txt")
+                    val mime = if (asHtml) "text/html" else "text/plain"
+                    produce(
+                        title = "Converted text",
+                        suggested = if (asHtml) "$stem.html" else "$stem.txt",
+                        mime = mime,
+                    ) { dest ->
+                        PdfOps.exportText(context, Uri.parse(uriString), null, dest, asHtml)
+                    }
                 }
             },
             onDismiss = { convertTarget = null },
@@ -408,6 +469,21 @@ fun HomeScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { infoFile = null }) { Text("Close") } },
+        )
+    }
+
+    // ---- result preview ------------------------------------------------------------------
+    pendingResult.value?.let { result ->
+        ResultPreview(
+            file = result,
+            title = pendingTitle,
+            suggestedName = pendingSuggested,
+            mime = pendingMime,
+            onOpen = { openUri, _ -> openCreated(openUri) },
+            onDiscard = {
+                runCatching { result.delete() }
+                pendingResult.value = null
+            },
         )
     }
 }
@@ -466,6 +542,7 @@ private fun HomeHeader(
 private fun QuickActions(
     onOpenFile: () -> Unit,
     onAnnotate: () -> Unit,
+    onMerge: () -> Unit,
     onConvert: () -> Unit,
     onFillForm: () -> Unit,
     onSign: () -> Unit,
@@ -474,6 +551,7 @@ private fun QuickActions(
     val actions = listOf(
         Triple("Open", Icons.Filled.Folder, onOpenFile),
         Triple("Annotate", Icons.Filled.Edit, onAnnotate),
+        Triple("Merge PDF", Icons.Filled.MergeType, onMerge),
         Triple("Convert", Icons.Filled.SwapHoriz, onConvert),
         Triple("Fill Form", Icons.Filled.CheckCircle, onFillForm),
         Triple("Sign", Icons.Filled.Description, onSign),
@@ -773,6 +851,133 @@ private fun ScanSheet(
             TextButton(onClick = onSave, enabled = pages.isNotEmpty()) { Text("Save as PDF") }
         }
         Spacer(Modifier.height(20.dp))
+    }
+}
+
+@Composable
+private fun NewPdfSheet(
+    pages: List<NewPage>,
+    onAddImages: () -> Unit,
+    onAddBlank: () -> Unit,
+    onRemove: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onClear: () -> Unit,
+    onCreate: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        Text("New PDF", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (pages.isEmpty()) {
+                "No pages yet. Add photos from your gallery, or blank pages to write on."
+            } else {
+                "${pages.size} page${if (pages.size == 1) "" else "s"} · each item becomes one page"
+            },
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        if (pages.isNotEmpty()) {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(pages.size) { index ->
+                    NewPageTile(
+                        page = pages[index],
+                        index = index,
+                        last = pages.size - 1,
+                        onRemove = { onRemove(index) },
+                        onMove = { to -> onMove(index, to) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            TextButton(onClick = onAddImages) {
+                Icon(Icons.Filled.Image, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Add images")
+            }
+            TextButton(onClick = onAddBlank) {
+                Icon(Icons.Filled.Add, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Blank page")
+            }
+            Spacer(Modifier.weight(1f))
+            if (pages.isNotEmpty()) {
+                TextButton(onClick = onClear) { Text("Clear") }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onCreate, enabled = pages.isNotEmpty()) { Text("Create PDF") }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+}
+
+@Composable
+private fun NewPageTile(
+    page: NewPage,
+    index: Int,
+    last: Int,
+    onRemove: () -> Unit,
+    onMove: (Int) -> Unit,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(modifier = Modifier.width(96.dp)) {
+            when (page) {
+                is NewPage.Image -> UriThumb(
+                    uri = page.uri,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(0.72f),
+                )
+
+                NewPage.Blank -> Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(0.72f)
+                        .background(Color.White, RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0x33000000), RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Blank", color = Color(0x99000000), fontSize = 12.sp)
+                }
+            }
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.align(Alignment.TopEnd).size(26.dp),
+            ) {
+                Icon(Icons.Filled.Close, contentDescription = "Remove page", tint = Color.White)
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .background(Color(0xAA000000), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            ) {
+                Text("${index + 1}", color = Color.White, fontSize = 10.sp)
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+                onClick = { onMove(index - 1) },
+                enabled = index > 0,
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Move left", modifier = Modifier.size(16.dp))
+            }
+            IconButton(
+                onClick = { onMove(index + 1) },
+                enabled = index < last,
+                modifier = Modifier.size(30.dp),
+            ) {
+                Icon(Icons.Filled.ArrowForward, contentDescription = "Move right", modifier = Modifier.size(16.dp))
+            }
+        }
     }
 }
 

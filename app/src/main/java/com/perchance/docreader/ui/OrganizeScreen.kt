@@ -63,6 +63,7 @@ import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Rotate / reorder / delete pages, or carve the document into smaller files. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,34 +83,27 @@ fun OrganizeScreen(
         }
         var busy by remember { mutableStateOf<String?>(null) }
         var extractOpen by remember { mutableStateOf(false) }
-        var pendingExtract by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+        val pendingResult = remember { mutableStateOf<File?>(null) }
+        var pendingTitle by remember { mutableStateOf("") }
+        var pendingSuggested by remember { mutableStateOf("") }
 
-        val save = rememberCreateDocument("application/pdf") { dest ->
+        /** Runs [op] into a cache file, then shows the result so the user can review it first. */
+        fun produce(title: String, suggested: String, op: (Uri) -> Unit) {
             scope.launch {
-                busy = "Saving…"
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { PdfOps.applyPageOps(context, Uri.parse(uri), pages, password, dest) }.isSuccess
-                }
+                busy = "Working…"
+                val out = File.createTempFile("docreader_result_", ".pdf", context.cacheDir)
+                val ok = withContext(Dispatchers.IO) { runCatching { op(Uri.fromFile(out)) }.isSuccess }
                 busy = null
-                snackbar.showSnackbar(if (ok) "Saved" else "Could not save")
-            }
-        }
-        val extractSave = rememberCreateDocument("application/pdf") { dest ->
-            val range = pendingExtract
-            if (range != null) {
-                scope.launch {
-                    busy = "Extracting…"
-                    val ok = withContext(Dispatchers.IO) {
-                        runCatching {
-                            PdfOps.extractRange(context, Uri.parse(uri), range.first, range.second, password, dest)
-                        }.isSuccess
-                    }
-                    busy = null
-                    pendingExtract = null
-                    snackbar.showSnackbar(if (ok) "Extracted page range" else "Could not extract")
+                if (ok && out.length() > 0L) {
+                    pendingTitle = title
+                    pendingSuggested = suggested
+                    pendingResult.value = out
+                } else {
+                    snackbar.showSnackbar("Could not save")
                 }
             }
         }
+
         val splitFolder = rememberPickFolder { dir ->
             scope.launch {
                 busy = "Splitting…"
@@ -149,9 +143,11 @@ fun OrganizeScreen(
                             Icon(Icons.Filled.Folder, contentDescription = "Split into folder")
                         }
                         IconButton(onClick = {
-                            save.launch(name.replace(".pdf", "", ignoreCase = true) + "_edited.pdf")
+                            produce("Organized PDF", name.replace(".pdf", "", ignoreCase = true) + "_edited.pdf") { dest ->
+                                PdfOps.applyPageOps(context, Uri.parse(uri), pages, password, dest)
+                            }
                         }) {
-                            Icon(Icons.Filled.Save, contentDescription = "Save")
+                            Icon(Icons.Filled.Save, contentDescription = "Preview & save")
                         }
                     },
                 )
@@ -220,8 +216,21 @@ fun OrganizeScreen(
                 onDismiss = { extractOpen = false },
                 onExtract = { from, to ->
                     extractOpen = false
-                    pendingExtract = from to to
-                    extractSave.launch(name.replace(".pdf", "", ignoreCase = true) + "_pages.pdf")
+                    produce("Extracted pages", name.replace(".pdf", "", ignoreCase = true) + "_pages.pdf") { dest ->
+                        PdfOps.extractRange(context, Uri.parse(uri), from, to, password, dest)
+                    }
+                },
+            )
+        }
+
+        pendingResult.value?.let { result ->
+            ResultPreview(
+                file = result,
+                title = pendingTitle,
+                suggestedName = pendingSuggested,
+                onDiscard = {
+                    runCatching { result.delete() }
+                    pendingResult.value = null
                 },
             )
         }

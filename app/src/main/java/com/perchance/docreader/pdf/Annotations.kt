@@ -9,6 +9,10 @@ enum class AnnKind { TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT }
  * overlay can be drawn on top of any zoom level, thumbnails included.
  *
  * [points] is a flattened list of x,y pairs (normalized) and is only used by [AnnKind.PEN].
+ *
+ * [fontSize] is only used by [AnnKind.TEXT]: it is the text height as a fraction of the page
+ * height (display space), so a note keeps its apparent size at any zoom level. Two fingers pinch
+ * a note to grow/shrink both its box and its text together.
  */
 data class Overlay(
     val id: String,
@@ -22,7 +26,15 @@ data class Overlay(
     val bottom: Float,
     val points: List<Float> = emptyList(),
     val text: String = "",
+    val fontSize: Float = DEFAULT_TEXT_SIZE,
 )
+
+/** Default text-note height, as a fraction of the page height. */
+const val DEFAULT_TEXT_SIZE = 0.05f
+
+/** Smallest / largest text-note height (fraction of the page height) the pinch gesture allows. */
+const val MIN_TEXT_SIZE = 0.012f
+const val MAX_TEXT_SIZE = 0.24f
 
 /** Preset colours shown in the annotation toolbar (WPS-style palette). */
 val ANNOTATION_COLORS = listOf(

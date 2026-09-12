@@ -78,6 +78,7 @@ import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -108,59 +109,44 @@ fun FileMenuScreen(
     var annotationsOpen by remember { mutableStateOf(false) }
 
     // ---- pending operation payloads (consumed by the launchers below) ----
-    var pendingMerge by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var pendingRange by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var pendingPassword by remember { mutableStateOf<String?>(null) }
     var compressWidth by remember { mutableStateOf(1400) }
     var compressQuality by remember { mutableStateOf(72) }
+    val pendingResult = remember { mutableStateOf<File?>(null) }
+    var pendingTitle by remember { mutableStateOf("") }
+    var pendingSuggested by remember { mutableStateOf("") }
+    var pendingNote by remember { mutableStateOf<String?>(null) }
 
     fun base() = name.replace(".pdf", "", ignoreCase = true)
 
-    val saveAs = rememberCreateDocument("application/pdf") { dest ->
+    /**
+     * Runs [op] into a private cache file and shows the result, so the user reviews the file
+     * before being asked where to save it. [op] may return a short note shown in the preview.
+     */
+    fun produce(title: String, suggested: String, op: (Uri) -> String?) {
         scope.launch {
-            busy = "Saving copy…"
-            val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(documentUri)?.use { input ->
-                        context.contentResolver.openOutputStream(dest)?.use { output -> input.copyTo(output) }
-                    }
-                }.isSuccess
-            }
+            busy = "Working…"
+            val out = File.createTempFile("docreader_result_", ".pdf", context.cacheDir)
+            val outcome = withContext(Dispatchers.IO) { runCatching { op(Uri.fromFile(out)) } }
             busy = null
-            snackbar.showSnackbar(if (ok) "Copy saved" else "Could not save copy")
-        }
-    }
-    val mergeDest = rememberCreateDocument("application/pdf") { dest ->
-        val sources = pendingMerge
-        if (sources.isNotEmpty()) {
-            scope.launch {
-                busy = "Merging ${sources.size} files…"
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { PdfOps.merge(context, sources, null, dest) }.isSuccess
+            outcome.onSuccess { note ->
+                if (out.length() > 0L) {
+                    pendingTitle = title
+                    pendingSuggested = suggested
+                    pendingNote = note
+                    pendingResult.value = out
+                } else {
+                    snackbar.showSnackbar("Operation failed")
                 }
-                busy = null
-                pendingMerge = emptyList()
-                snackbar.showSnackbar(if (ok) "Merged ${sources.size} files" else "Merge failed")
-            }
+            }.onFailure { snackbar.showSnackbar("Operation failed: ${it.message}") }
         }
     }
+
     val mergePick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
-            pendingMerge = listOf(documentUri) + uris
-            mergeDest.launch("${base()}_merged.pdf")
-        }
-    }
-    val extractDest = rememberCreateDocument("application/pdf") { dest ->
-        val range = pendingRange
-        if (range != null) {
-            scope.launch {
-                busy = "Extracting…"
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { PdfOps.extractRange(context, documentUri, range.first, range.second, null, dest) }.isSuccess
-                }
-                busy = null
-                pendingRange = null
-                snackbar.showSnackbar(if (ok) "Extracted" else "Extract failed")
+            val sources = listOf(documentUri) + uris
+            produce("Merged PDF", "${base()}_merged.pdf") { dest ->
+                PdfOps.merge(context, sources, null, dest)
+                "Merged ${sources.size} files"
             }
         }
     }
@@ -172,46 +158,6 @@ fun FileMenuScreen(
             }
             busy = null
             snackbar.showSnackbar("Wrote ${written.size} file(s)")
-        }
-    }
-    val compressDest = rememberCreateDocument("application/pdf") { dest ->
-        scope.launch {
-            busy = "Compressing…"
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    PdfOps.compress(context, documentUri, null, compressWidth, compressQuality, dest)
-                }.getOrNull()
-            }
-            busy = null
-            infoText = if (result != null) {
-                "Compressed: ${formatSize(result.first)} → ${formatSize(result.second)}"
-            } else {
-                "Compression failed"
-            }
-        }
-    }
-    val passwordDest = rememberCreateDocument("application/pdf") { dest ->
-        val pwd = pendingPassword
-        if (!pwd.isNullOrEmpty()) {
-            scope.launch {
-                busy = "Encrypting…"
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { PdfOps.setPassword(context, documentUri, null, pwd, pwd, dest) }.isSuccess
-                }
-                busy = null
-                pendingPassword = null
-                snackbar.showSnackbar(if (ok) "Password set" else "Could not set password")
-            }
-        }
-    }
-    val unlockDest = rememberCreateDocument("application/pdf") { dest ->
-        scope.launch {
-            busy = "Removing protection…"
-            val ok = withContext(Dispatchers.IO) {
-                runCatching { PdfOps.removePassword(context, documentUri, null, dest) }.isSuccess
-            }
-            busy = null
-            snackbar.showSnackbar(if (ok) "Protection removed" else "Could not remove protection")
         }
     }
 
@@ -271,7 +217,16 @@ fun FileMenuScreen(
                     RoundAction(Icons.Filled.List, "Content") { onOpenReader() }
                     RoundAction(Icons.Filled.Share, "Share") { share() }
                     RoundAction(Icons.Filled.GridView, "Thumbnail") { onOpenReader() }
-                    RoundAction(Icons.Filled.Save, "Save as") { saveAs.launch("${base()}_copy.pdf") }
+                    RoundAction(Icons.Filled.Save, "Save as") {
+                        produce("Copy of $name", "${base()}_copy.pdf") { dest ->
+                            context.contentResolver.openInputStream(documentUri)?.use { input ->
+                                context.contentResolver.openOutputStream(dest)?.use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            null
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(18.dp))
@@ -298,7 +253,10 @@ fun FileMenuScreen(
                     MenuRow(Icons.Filled.Lock, "Set password") { dialog = "password" }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     MenuRow(Icons.Filled.LockOpen, "Remove password") {
-                        unlockDest.launch("${base()}_unlocked.pdf")
+                        produce("Unlocked PDF", "${base()}_unlocked.pdf") { dest ->
+                            PdfOps.removePassword(context, documentUri, null, dest)
+                            null
+                        }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     MenuRow(Icons.Filled.ViewModule, "Organize pages") { onOpenOrganize() }
@@ -341,8 +299,10 @@ fun FileMenuScreen(
         "split" -> SplitDialog(
             onExtractRange = { from, to ->
                 dialog = null
-                pendingRange = from to to
-                extractDest.launch("${base()}_pages.pdf")
+                produce("Extracted pages", "${base()}_pages.pdf") { dest ->
+                    PdfOps.extractRange(context, documentUri, from, to, null, dest)
+                    null
+                }
             },
             onSplitFolder = {
                 dialog = null
@@ -361,7 +321,17 @@ fun FileMenuScreen(
                     compressWidth = 900
                     compressQuality = 52
                 }
-                compressDest.launch("${base()}_compressed.pdf")
+                produce("Compressed PDF", "${base()}_compressed.pdf") { dest ->
+                    val (before, after) = PdfOps.compress(
+                        context,
+                        documentUri,
+                        null,
+                        compressWidth,
+                        compressQuality,
+                        dest,
+                    )
+                    "Compressed: ${formatSize(before)} → ${formatSize(after)}"
+                }
             },
             onDismiss = { dialog = null },
         )
@@ -378,8 +348,10 @@ fun FileMenuScreen(
         "password" -> PasswordSetDialog(
             onSet = { pwd ->
                 dialog = null
-                pendingPassword = pwd
-                passwordDest.launch("${base()}_protected.pdf")
+                produce("Protected PDF", "${base()}_protected.pdf") { dest ->
+                    PdfOps.setPassword(context, documentUri, null, pwd, pwd, dest)
+                    null
+                }
             },
             onDismiss = { dialog = null },
         )
@@ -430,6 +402,19 @@ fun FileMenuScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { annotationsOpen = false }) { Text("Close") } },
+        )
+    }
+
+    pendingResult.value?.let { result ->
+        ResultPreview(
+            file = result,
+            title = pendingTitle,
+            suggestedName = pendingSuggested,
+            note = pendingNote,
+            onDiscard = {
+                runCatching { result.delete() }
+                pendingResult.value = null
+            },
         )
     }
 }

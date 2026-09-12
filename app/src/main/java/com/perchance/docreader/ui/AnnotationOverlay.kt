@@ -112,7 +112,10 @@ private fun DrawScope.drawAnnotation(
                     textMeasurer = measurer,
                     text = o.text,
                     topLeft = Offset(left + 2f, top + 2f),
-                    style = TextStyle(color = color, fontSize = (height * 0.62f).toSp()),
+                    style = TextStyle(
+                        color = color,
+                        fontSize = (o.fontSize * size.height).toSp(),
+                    ),
                 )
             }
         }

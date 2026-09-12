@@ -2,6 +2,7 @@ package com.perchance.docreader.data
 
 import android.content.Context
 import com.perchance.docreader.pdf.AnnKind
+import com.perchance.docreader.pdf.DEFAULT_TEXT_SIZE
 import com.perchance.docreader.pdf.Overlay
 import org.json.JSONArray
 import org.json.JSONObject
@@ -57,6 +58,7 @@ class AnnotationStore(context: Context) {
         .put("right", o.right.toDouble())
         .put("bottom", o.bottom.toDouble())
         .put("text", o.text)
+        .put("fontSize", o.fontSize.toDouble())
         .put("points", JSONArray().apply { o.points.forEach { put(it.toDouble()) } })
 
     private fun fromJson(o: JSONObject): Overlay {
@@ -76,6 +78,7 @@ class AnnotationStore(context: Context) {
             bottom = o.optDouble("bottom", 0.0).toFloat(),
             points = pts,
             text = o.optString("text", ""),
+            fontSize = o.optDouble("fontSize", DEFAULT_TEXT_SIZE.toDouble()).toFloat(),
         )
     }
 }
