@@ -22,13 +22,18 @@ android {
     signingConfigs {
         if (hasReleaseKey) {
             create("release") {
-                val props = java.util.Properties().apply {
-                    keystoreProps.inputStream().use { load(it) }
-                }
-                storeFile = rootProject.file(props.getProperty("storeFile"))
-                storePassword = props.getProperty("storePassword")
-                keyAlias = props.getProperty("keyAlias")
-                keyPassword = props.getProperty("keyPassword")
+                val props = keystoreProps.readLines()
+                    .mapNotNull { raw ->
+                        val line = raw.trim()
+                        val eq = line.indexOf('=')
+                        if (line.isEmpty() || line.startsWith("#") || eq <= 0) null
+                        else line.substring(0, eq).trim() to line.substring(eq + 1).trim()
+                    }
+                    .toMap()
+                storeFile = rootProject.file(props.getValue("storeFile"))
+                storePassword = props["storePassword"]
+                keyAlias = props["keyAlias"]
+                keyPassword = props["keyPassword"]
             }
         }
     }
