@@ -36,6 +36,18 @@
                 <data android:mimeType="application/x-pdf" />
             </intent-filter>
         </activity>
+
+        <!-- Shared cache file for photos captured by the in-app scanner and handed to the
+             system camera app for full-resolution capture. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

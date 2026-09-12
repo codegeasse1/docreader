@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -68,11 +69,25 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Root composable. Screens are kept on a small in-memory back stack so the system back button
+ * returns to the previous screen instead of closing the app.
+ */
 @Composable
 fun DocReaderApp(pendingOpen: MutableState<String?>) {
     val context = LocalContext.current
     val store = remember { RecentStore(context.applicationContext) }
-    var screen by remember { mutableStateOf<Screen>(Screen.Home) }
+    var stack by remember { mutableStateOf<List<Screen>>(listOf(Screen.Home)) }
+
+    fun push(screen: Screen) {
+        stack = stack + screen
+    }
+
+    fun pop() {
+        if (stack.size > 1) stack = stack.dropLast(1)
+    }
+
+    BackHandler(enabled = stack.size > 1) { pop() }
 
     val pending = pendingOpen.value
     LaunchedEffect(pending) {
@@ -93,63 +108,66 @@ fun DocReaderApp(pendingOpen: MutableState<String?>) {
                     lastOpened = System.currentTimeMillis(),
                 )
             )
-            screen = Screen.Reader(uri.toString(), name)
+            push(Screen.Reader(uri.toString(), name))
             pendingOpen.value = null
         }
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        when (val current = screen) {
+        when (val current = stack.last()) {
             is Screen.Home -> HomeScreen(
                 store = store,
-                onOpen = { uri, name -> screen = Screen.Reader(uri, name) },
+                onOpen = { uri, name -> push(Screen.Reader(uri, name)) },
+                onAnnotate = { uri, name -> push(Screen.Annotate(uri, name, 0)) },
+                onFillForm = { uri, name -> push(Screen.FillForm(uri, name)) },
+                onSign = { uri, name -> push(Screen.Sign(uri, name)) },
             )
 
             is Screen.Reader -> ReaderScreen(
                 uri = current.uri,
                 name = current.name,
-                onBack = { screen = Screen.Home },
-                onOpenFileMenu = { screen = Screen.FileMenu(current.uri, current.name) },
-                onOpenAnnotate = { page -> screen = Screen.Annotate(current.uri, current.name, page) },
-                onOpenOrganize = { screen = Screen.Organize(current.uri, current.name) },
-                onOpenFillForm = { screen = Screen.FillForm(current.uri, current.name) },
-                onOpenSign = { screen = Screen.Sign(current.uri, current.name) },
+                onBack = { pop() },
+                onOpenFileMenu = { push(Screen.FileMenu(current.uri, current.name)) },
+                onOpenAnnotate = { page -> push(Screen.Annotate(current.uri, current.name, page)) },
+                onOpenOrganize = { push(Screen.Organize(current.uri, current.name)) },
+                onOpenFillForm = { push(Screen.FillForm(current.uri, current.name)) },
+                onOpenSign = { push(Screen.Sign(current.uri, current.name)) },
             )
 
             is Screen.FileMenu -> FileMenuScreen(
                 uri = current.uri,
                 name = current.name,
-                onBack = { screen = Screen.Reader(current.uri, current.name) },
-                onOpenReader = { screen = Screen.Reader(current.uri, current.name) },
-                onOpenAnnotate = { screen = Screen.Annotate(current.uri, current.name, 0) },
-                onOpenOrganize = { screen = Screen.Organize(current.uri, current.name) },
-                onOpenFillForm = { screen = Screen.FillForm(current.uri, current.name) },
-                onOpenSign = { screen = Screen.Sign(current.uri, current.name) },
+                onBack = { pop() },
+                onOpenReader = { push(Screen.Reader(current.uri, current.name)) },
+                onOpenAnnotate = { push(Screen.Annotate(current.uri, current.name, 0)) },
+                onOpenOrganize = { push(Screen.Organize(current.uri, current.name)) },
+                onOpenFillForm = { push(Screen.FillForm(current.uri, current.name)) },
+                onOpenSign = { push(Screen.Sign(current.uri, current.name)) },
             )
 
             is Screen.Annotate -> AnnotateScreen(
                 uri = current.uri,
                 name = current.name,
                 initialPage = current.page,
-                onBack = { screen = Screen.Reader(current.uri, current.name) },
+                onBack = { pop() },
             )
 
             is Screen.Organize -> OrganizeScreen(
                 uri = current.uri,
                 name = current.name,
-                onBack = { screen = Screen.Reader(current.uri, current.name) },
+                onBack = { pop() },
             )
 
             is Screen.FillForm -> FillFormScreen(
                 uri = current.uri,
                 name = current.name,
-                onBack = { screen = Screen.Reader(current.uri, current.name) },
+                onBack = { pop() },
             )
 
             is Screen.Sign -> SignScreen(
                 uri = current.uri,
                 name = current.name,
-                onBack = { screen = Screen.Reader(current.uri, current.name) },
+                onBack = { pop() },
             )
         }
     }

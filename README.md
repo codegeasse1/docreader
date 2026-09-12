@@ -28,14 +28,36 @@ MIT licensed.
 To publish the APKs on a Release page, push a tag:
 
 ```bash
-git tag v1.1 && git push origin v1.1
+git tag v1.2 && git push origin v1.2
 ```
+
+## Changelog
+
+### 1.2 — "no more dummy UI"
+Every control on every screen is now actually wired; the leftover
+placeholder chrome was removed.
+
+- **Removed** the fake profile avatar/initials badge and the "Cloud" entry in
+  the create sheet — neither had any backing feature.
+- **Home quick actions** (Open / Annotate / Convert / Fill Form / Sign / Scan)
+  all launch their real flow instead of doing nothing.
+- **Create a PDF** sheet: Blank PDF, **Scan** (camera capture + gallery pages →
+  new PDF), Photos → PDF, Documents (pick several PDFs → merge), Open a PDF.
+- **Scan to PDF** works end-to-end: full-resolution capture through a
+  `FileProvider` cache URI, thumbnail review, remove/clear, "Save as PDF".
+- **Back navigation** now pops an in-app back stack (`BackHandler`) — pressing
+  back inside a document returns to the previous screen instead of exiting.
+- **Annotate**: text notes are live, draggable and tappable-to-edit, and the
+  **Move** tool hit-tests and drags pen/highlight/underline/strike shapes.
+- **Reader zoom** anchors to the pinch focal point (and to the viewport centre
+  for the +/- buttons) instead of snapping to the top-left corner.
 
 ## Features
 
 **Viewing**
 - Continuous page view built on `PdfRenderer`, pinch-to-zoom and zoom
-  buttons, go-to-page dialog, page thumbnails grid.
+  buttons (both anchored on the pinch focal point), go-to-page dialog, page
+  thumbnails grid.
 - Encrypted PDFs prompt for the password (decrypted through PDFBox first).
 - Recent files + starred files, persistent across launches.
 - Bookmarks (per document), annotation list, in-document **text search with
@@ -43,10 +65,15 @@ git tag v1.1 && git push origin v1.1
 - Registers for `ACTION_VIEW` on `application/pdf`, so "Open with DocReader"
   works from any file manager.
 
+**Creating**
+- **Blank PDF**, **Scan to PDF** (camera capture and/or gallery photos, one
+  page each), **Photos → PDF**, and **merge** several PDFs into one.
+
 **Editing** (all use PDFBox-Android)
-- **Annotate**: freehand pen, highlight, underline, strike-through, and text
-  notes, with colour palette, undo, and "save as" that bakes the annotations
-  into a real PDF copy.
+- **Annotate**: freehand pen, highlight, underline, strike-through, and
+  draggable/editable text notes, with colour palette, undo, a **Move** tool for
+  repositioning any annotation, and "save as" that bakes the annotations into a
+  real PDF copy.
 - **Organize pages**: rotate, reorder, delete, then save; extract a page range;
   split every page into its own file inside a chosen folder.
 - **Merge** several PDFs into one.
@@ -76,7 +103,7 @@ app/src/main/java/com/perchance/docreader/
 │   ├── Annotations.kt       # AnnKind / Overlay model + palette
 │   └── PdfOps.kt            # every PDFBox operation (merge, split, sign, …)
 └── ui/
-    ├── HomeScreen.kt        # dashboard, recents, FAB sheet
+    ├── HomeScreen.kt        # dashboard, recents, quick actions, create/scan sheet
     ├── ReaderScreen.kt      # viewer, search, thumbnails, bookmarks, tools
     ├── FileMenuScreen.kt    # file actions (merge, split, compress, print, …)
     ├── AnnotateScreen.kt    # pen/highlight/underline/strike/text editor
@@ -122,6 +149,7 @@ This scaffold was written in a workspace with no Android SDK, so it is
 - [x] Fill AcroForm fields
 - [x] Digital signature
 - [x] Compress
+- [x] Create PDF (blank / photos / scan-to-PDF) and merge
 - [ ] PDF → Word/Excel conversion (server-side; local fidelity is poor)
 - [ ] Office docs (.docx/.xlsx/.pptx) viewing (WebView + HTML renderer)
-- [ ] OCR / scan-to-PDF
+- [ ] OCR (scan-to-PDF exists, but without text recognition)

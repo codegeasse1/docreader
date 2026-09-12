@@ -51,6 +51,14 @@ class PdfDocumentHandle(context: Context, uri: Uri, password: String? = null) : 
         renderer.openPage(index).use { it.width to it.height }
     }.getOrNull()
 
+    /**
+     * Height / width ratio of [index]'s page at its natural (post-rotation) orientation.
+     * Used by the reader to keep the pinch focal point fixed while zooming.
+     */
+    fun pageAspect(index: Int): Float = runCatching {
+        renderer.openPage(index).use { it.height.toFloat() / it.width.toFloat() }
+    }.getOrDefault(1.4142f)
+
     /** Renders [index] scaled to [targetWidth] px wide. Returns null if rendering fails. */
     fun render(index: Int, targetWidth: Int): Bitmap? {
         if (index < 0 || index >= pageCount) return null

@@ -8,11 +8,14 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -64,6 +68,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.perchance.docreader.data.AnnotationStore
@@ -75,12 +81,17 @@ import com.perchance.docreader.pdf.PdfOps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 
 private enum class AnnTool { MOVE, TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT }
 
 /**
  * Page-by-page annotation editor. Annotations are kept in AnnotationStore in display space and
  * exported into a real PDF copy via PdfOps.writeAnnotations.
+ *
+ * Text notes are rendered as live composables so they can be dragged (with any tool, or the
+ * dedicated Move tool) and tapped to edit. The pen/highlight/underline/strike tools are drawn on
+ * a canvas, and the Move tool can drag those shapes too.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -106,9 +117,25 @@ fun AnnotateScreen(
         var color by remember { mutableStateOf(ANNOTATION_COLORS.first()) }
         var width by remember { mutableStateOf(0.02f) }
         var pendingText by remember { mutableStateOf<Offset?>(null) }
+        var editing by remember { mutableStateOf<Overlay?>(null) }
         var busy by remember { mutableStateOf<String?>(null) }
 
         val page = pagerState.currentPage
+
+        fun commit(overlay: Overlay) {
+            annStore.add(uri, overlay)
+            reloadKey++
+        }
+
+        fun update(overlay: Overlay) {
+            annStore.replace(uri, overlay)
+            reloadKey++
+        }
+
+        fun delete(id: String) {
+            annStore.remove(uri, id)
+            reloadKey++
+        }
 
         val export = rememberCreateDocument("application/pdf") { dest ->
             scope.launch {
@@ -137,9 +164,7 @@ fun AnnotateScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = {
-                            overlays.lastOrNull()?.let { annStore.remove(uri, it.id); reloadKey++ }
-                        }) {
+                        IconButton(onClick = { overlays.lastOrNull()?.let { delete(it.id) } }) {
                             Icon(Icons.Filled.Undo, contentDescription = "Undo")
                         }
                         IconButton(onClick = {
@@ -206,8 +231,11 @@ fun AnnotateScreen(
                         tool = tool,
                         color = color,
                         width = width,
-                        onCommit = { o -> annStore.add(uri, o); reloadKey++ },
+                        onCommit = { commit(it) },
+                        onUpdate = { update(it) },
+                        onDelete = { delete(it) },
                         onTapText = { pendingText = it },
+                        onEditText = { editing = it },
                     )
                 }
                 BusyOverlay(busy)
@@ -215,13 +243,13 @@ fun AnnotateScreen(
         }
 
         pendingText?.let { point ->
-            AddNoteDialog(
-                onDismiss = { pendingText = null },
-                onAdd = { text ->
-                    val x = point.x.coerceIn(0f, 0.9f)
+            NoteDialog(
+                title = "Add note",
+                initial = "",
+                onSave = { text ->
+                    val x = point.x.coerceIn(0f, 0.55f)
                     val y = point.y.coerceIn(0f, 0.9f)
-                    annStore.add(
-                        uri,
+                    commit(
                         Overlay(
                             id = annStore.newId(),
                             page = page,
@@ -233,27 +261,56 @@ fun AnnotateScreen(
                             right = (x + 0.4f).coerceAtMost(1f),
                             bottom = (y + 0.08f).coerceAtMost(1f),
                             text = text,
-                        ),
+                        )
                     )
                     pendingText = null
-                    reloadKey++
                 },
+                onDismiss = { pendingText = null },
+            )
+        }
+
+        editing?.let { note ->
+            NoteDialog(
+                title = "Edit note",
+                initial = note.text,
+                onSave = { text ->
+                    update(note.copy(text = text))
+                    editing = null
+                },
+                onDelete = {
+                    delete(note.id)
+                    editing = null
+                },
+                onDismiss = { editing = null },
             )
         }
     }
 }
 
 @Composable
-private fun AddNoteDialog(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
+private fun NoteDialog(
+    title: String,
+    initial: String,
+    onSave: (String) -> Unit,
+    onDelete: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
+    var text by remember(initial) { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add note") },
+        title = { Text(title) },
         text = {
             OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Text") })
         },
-        confirmButton = { TextButton(onClick = { onAdd(text) }) { Text("Add") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { TextButton(onClick = { onSave(text) }) { Text("Save") } },
+        dismissButton = {
+            Row {
+                if (onDelete != null) {
+                    TextButton(onClick = onDelete) { Text("Delete") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
     )
 }
 
@@ -266,92 +323,233 @@ private fun AnnotatedPage(
     color: Long,
     width: Float,
     onCommit: (Overlay) -> Unit,
+    onUpdate: (Overlay) -> Unit,
+    onDelete: (String) -> Unit,
     onTapText: (Offset) -> Unit,
+    onEditText: (Overlay) -> Unit,
 ) {
     val bitmap by produceState<Bitmap?>(initialValue = null, handle, pageIndex) {
         value = withContext(Dispatchers.IO) { handle.render(pageIndex, 1400) }
     }
-    var localDraft by remember(pageIndex) { mutableStateOf<Overlay?>(null) }
+    var draft by remember(pageIndex) { mutableStateOf<Overlay?>(null) }
+    var moving by remember(pageIndex) { mutableStateOf<Overlay?>(null) }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         val bmp = bitmap
         if (bmp == null) {
             CircularProgressIndicator(color = Color.White)
         } else {
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat()),
             ) {
+                val pageWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+                val pageHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+
                 Image(
                     bitmap = bmp.asImageBitmap(),
                     contentDescription = "Page ${pageIndex + 1}",
                     contentScale = ContentScale.FillBounds,
                     modifier = Modifier.fillMaxSize(),
                 )
+
+                // Pen / highlighter / underline / strike overlays (plus the live draft / move preview).
+                val shapes = overlays.filter { it.kind != AnnKind.TEXT } +
+                    listOfNotNull(draft?.takeIf { it.kind != AnnKind.TEXT }) +
+                    listOfNotNull(moving)
                 AnnotationLayer(
-                    overlays = overlays + listOfNotNull(localDraft),
-                    activeId = localDraft?.id,
+                    overlays = shapes,
+                    activeId = moving?.id ?: draft?.id,
                 )
+
+                // Drawing / moving surface, sits under the text notes so they can handle their own drags.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .pointerInput(tool, color, width) {
-                            if (tool == AnnTool.MOVE) return@pointerInput
-                            if (tool == AnnTool.TEXT) {
-                                detectTapGestures { offset ->
-                                    onTapText(
-                                        Offset(
-                                            (offset.x / size.width).coerceIn(0f, 1f),
-                                            (offset.y / size.height).coerceIn(0f, 1f),
-                                        )
-                                    )
-                                }
-                                return@pointerInput
-                            }
+                        .pointerInput(tool, color, width, overlays, pageWidthPx, pageHeightPx) {
                             val normX = { x: Float -> (x / size.width).coerceIn(0f, 1f) }
                             val normY = { y: Float -> (y / size.height).coerceIn(0f, 1f) }
-                            var start = Offset.Zero
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    start = offset
-                                    localDraft = newOverlay(
-                                        kind = toolToKind(tool),
-                                        color = color,
-                                        width = width,
-                                        page = pageIndex,
-                                        left = normX(offset.x),
-                                        top = normY(offset.y),
-                                        right = normX(offset.x),
-                                        bottom = normY(offset.y),
-                                        points = mutableListOf(normX(offset.x), normY(offset.y)),
-                                    )
-                                },
-                                onDrag = { change, _ ->
-                                    change.consume()
-                                    val cur = localDraft ?: return@detectDragGestures
-                                    localDraft = if (cur.kind == AnnKind.PEN) {
-                                        cur.copy(points = cur.points + normX(change.position.x) + normY(change.position.y))
-                                    } else {
-                                        cur.copy(
-                                            left = normX(minOf(start.x, change.position.x)),
-                                            top = normY(minOf(start.y, change.position.y)),
-                                            right = normX(maxOf(start.x, change.position.x)),
-                                            bottom = normY(maxOf(start.y, change.position.y)),
-                                        )
+                            when (tool) {
+                                AnnTool.MOVE -> awaitEachGesture {
+                                    val down = awaitFirstDown()
+                                    val nx = normX(down.position.x)
+                                    val ny = normY(down.position.y)
+                                    val hit = hitTest(overlays, nx, ny) ?: return@awaitEachGesture
+                                    down.consume()
+                                    var current = hit
+                                    var last = down.position
+                                    var changed = false
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                        if (!change.pressed) {
+                                            change.consume()
+                                            break
+                                        }
+                                        val dx = (change.position.x - last.x) / size.width
+                                        val dy = (change.position.y - last.y) / size.height
+                                        if (dx != 0f || dy != 0f) {
+                                            if (abs(dx) + abs(dy) > 0.001f) changed = true
+                                            current = translate(current, dx, dy)
+                                            moving = current
+                                            last = change.position
+                                        }
+                                        change.consume()
                                     }
-                                },
-                                onDragEnd = {
-                                    val finished = localDraft
-                                    if (finished != null && isValid(finished)) onCommit(finished)
-                                    localDraft = null
-                                },
-                                onDragCancel = { localDraft = null },
-                            )
+                                    if (changed) onUpdate(current) else if (hit.kind == AnnKind.TEXT) onEditText(hit)
+                                    moving = null
+                                }
+
+                                AnnTool.TEXT -> detectTapGestures { offset ->
+                                    onTapText(Offset(normX(offset.x), normY(offset.y)))
+                                }
+
+                                else -> {
+                                    var start = Offset.Zero
+                                    detectDragGestures(
+                                        onDragStart = { offset ->
+                                            start = offset
+                                            draft = newOverlay(
+                                                kind = toolToKind(tool),
+                                                color = color,
+                                                width = width,
+                                                page = pageIndex,
+                                                left = normX(offset.x),
+                                                top = normY(offset.y),
+                                                right = normX(offset.x),
+                                                bottom = normY(offset.y),
+                                                points = mutableListOf(normX(offset.x), normY(offset.y)),
+                                            )
+                                        },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val cur = draft ?: return@detectDragGestures
+                                            draft = if (cur.kind == AnnKind.PEN) {
+                                                cur.copy(
+                                                    points = cur.points +
+                                                        normX(change.position.x) + normY(change.position.y)
+                                                )
+                                            } else {
+                                                cur.copy(
+                                                    left = normX(minOf(start.x, change.position.x)),
+                                                    top = normY(minOf(start.y, change.position.y)),
+                                                    right = normX(maxOf(start.x, change.position.x)),
+                                                    bottom = normY(maxOf(start.y, change.position.y)),
+                                                )
+                                            }
+                                        },
+                                        onDragEnd = {
+                                            val finished = draft
+                                            if (finished != null && isValid(finished)) onCommit(finished)
+                                            draft = null
+                                        },
+                                        onDragCancel = { draft = null },
+                                    )
+                                }
+                            }
                         },
                 )
+
+                // Live, draggable text notes.
+                overlays.filter { it.kind == AnnKind.TEXT }.forEach { note ->
+                    DraggableTextNote(
+                        note = note,
+                        pageWidthPx = pageWidthPx,
+                        pageHeightPx = pageHeightPx,
+                        onUpdate = onUpdate,
+                        onEdit = { onEditText(note) },
+                        onDelete = { onDelete(note.id) },
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun DraggableTextNote(
+    note: Overlay,
+    pageWidthPx: Float,
+    pageHeightPx: Float,
+    onUpdate: (Overlay) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val density = LocalDensity.current
+    var live by remember(note.id) { mutableStateOf<Offset?>(null) }
+    val leftNorm = live?.x ?: note.left
+    val topNorm = live?.y ?: note.top
+    val boxWidth = ((note.right - note.left) * pageWidthPx).coerceAtLeast(48f)
+    val boxHeight = ((note.bottom - note.top) * pageHeightPx).coerceAtLeast(32f)
+    val fontSize = with(density) { (boxHeight * 0.55f).toSp().value }.coerceIn(9f, 26f).sp
+
+    Box(
+        modifier = Modifier
+            .offset(
+                x = with(density) { (leftNorm * pageWidthPx).toDp() },
+                y = with(density) { (topNorm * pageHeightPx).toDp() },
+            )
+            .width(with(density) { boxWidth.toDp() })
+            .height(with(density) { boxHeight.toDp() })
+            .background(Color(note.color).copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+            .border(1.dp, Color(note.color), RoundedCornerShape(4.dp))
+            .pointerInput(note.id) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    var last = down.position
+                    var moved = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) {
+                            change.consume()
+                            break
+                        }
+                        val dx = change.position.x - last.x
+                        val dy = change.position.y - last.y
+                        if (abs(dx) + abs(dy) > 0f) {
+                            if (abs(dx) + abs(dy) > 2f) moved = true
+                            val cur = live ?: Offset(note.left, note.top)
+                            val maxX = (1f - (note.right - note.left)).coerceAtLeast(0f)
+                            val maxY = (1f - (note.bottom - note.top)).coerceAtLeast(0f)
+                            live = Offset(
+                                (cur.x + dx / pageWidthPx).coerceIn(0f, maxX),
+                                (cur.y + dy / pageHeightPx).coerceIn(0f, maxY),
+                            )
+                            last = change.position
+                        }
+                        change.consume()
+                    }
+                    val settled = live
+                    if (moved && settled != null) {
+                        val w = note.right - note.left
+                        val h = note.bottom - note.top
+                        onUpdate(
+                            note.copy(
+                                left = settled.x,
+                                top = settled.y,
+                                right = settled.x + w,
+                                bottom = settled.y + h,
+                            )
+                        )
+                    } else if (!moved) {
+                        onEdit()
+                    }
+                    live = null
+                }
+            }
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = note.text.ifBlank { "Note" },
+            color = Color(note.color),
+            fontSize = fontSize,
+            maxLines = 3,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -361,6 +559,35 @@ private fun toolToKind(tool: AnnTool): AnnKind = when (tool) {
     AnnTool.UNDERLINE -> AnnKind.UNDERLINE
     AnnTool.STRIKEOUT -> AnnKind.STRIKEOUT
     else -> AnnKind.TEXT
+}
+
+private fun hitTest(overlays: List<Overlay>, nx: Float, ny: Float): Overlay? {
+    for (o in overlays.asReversed()) {
+        if (o.kind == AnnKind.TEXT) continue
+        if (o.kind == AnnKind.PEN) {
+            var i = 0
+            val tol = 0.03f
+            while (i + 1 < o.points.size) {
+                if (abs(o.points[i] - nx) < tol && abs(o.points[i + 1] - ny) < tol) return o
+                i += 2
+            }
+        }
+        if (withinBox(o, nx, ny, 0.02f)) return o
+    }
+    return null
+}
+
+private fun withinBox(o: Overlay, nx: Float, ny: Float, pad: Float): Boolean =
+    nx >= o.left - pad && nx <= o.right + pad && ny >= o.top - pad && ny <= o.bottom + pad
+
+private fun translate(o: Overlay, dx: Float, dy: Float): Overlay {
+    val ddx = dx.coerceIn(-o.left, 1f - o.right)
+    val ddy = dy.coerceIn(-o.top, 1f - o.bottom)
+    return if (o.kind == AnnKind.PEN) {
+        o.copy(points = o.points.mapIndexed { index, value -> value + if (index % 2 == 0) ddx else ddy })
+    } else {
+        o.copy(left = o.left + ddx, right = o.right + ddx, top = o.top + ddy, bottom = o.bottom + ddy)
+    }
 }
 
 private var overlaySeq = 0

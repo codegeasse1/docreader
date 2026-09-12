@@ -2,6 +2,7 @@ package com.perchance.docreader.pdf
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.perchance.docreader.data.formatSize
@@ -120,6 +121,70 @@ object PdfOps {
             }
         }
         return floatArrayOf(box.lowerLeftX + ux * box.width, box.lowerLeftY + (1f - uy) * box.height)
+    }
+
+    // ---------------------------------------------------------------- creation
+
+    /** Writes a brand-new single-page blank A4 PDF to [dest]. */
+    fun createBlank(ctx: Context, dest: Uri) {
+        PDDocument().use { doc ->
+            doc.addPage(PDPage(PDRectangle.A4))
+            outStream(ctx, dest).use { doc.save(it) }
+        }
+    }
+
+    /**
+     * Builds a new PDF where each entry of [images] (a photo, a scan or any image Uri) becomes
+     * its own page. Pages keep the image aspect ratio, scaled to A4 width. Returns the page count.
+     */
+    fun createFromImages(ctx: Context, images: List<Uri>, dest: Uri, maxDimension: Int = 2400): Int {
+        if (images.isEmpty()) error("Pick at least one image")
+        var pages = 0
+        PDDocument().use { doc ->
+            for ((i, u) in images.withIndex()) {
+                val raw = decodeScaled(ctx, u, maxDimension) ?: continue
+                val bmp = flattenOnWhite(raw)
+                val img = PDImageXObject.createFromByteArray(doc, jpegBytes(bmp, 88), "img$i")
+                val widthPt = PDRectangle.A4.width
+                val heightPt = widthPt * (img.height.toFloat() / img.width.toFloat())
+                val page = PDPage(PDRectangle(widthPt, heightPt))
+                doc.addPage(page)
+                PDPageContentStream(doc, page).use { cs ->
+                    cs.drawImage(img, 0f, 0f, widthPt, heightPt)
+                }
+                bmp.recycle()
+                if (bmp !== raw) raw.recycle()
+                pages++
+            }
+            if (pages == 0) error("None of the chosen images could be read")
+            outStream(ctx, dest).use { doc.save(it) }
+        }
+        return pages
+    }
+
+    private fun decodeScaled(ctx: Context, uri: Uri, maxDimension: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching {
+            ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / sample > maxDimension || bounds.outHeight / sample > maxDimension) {
+            sample *= 2
+        }
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return runCatching {
+            ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+        }.getOrNull()
+    }
+
+    private fun flattenOnWhite(bmp: Bitmap): Bitmap {
+        if (!bmp.hasAlpha()) return bmp
+        val out = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        canvas.drawColor(android.graphics.Color.WHITE)
+        canvas.drawBitmap(bmp, 0f, 0f, null)
+        return out
     }
 
     // ---------------------------------------------------------------- info

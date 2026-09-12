@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -76,18 +79,23 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.perchance.docreader.data.AnnotationStore
@@ -97,6 +105,8 @@ import com.perchance.docreader.pdf.Overlay
 import com.perchance.docreader.pdf.PdfDocumentHandle
 import com.perchance.docreader.pdf.PdfOps
 import com.perchance.docreader.pdf.SearchHit
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -161,13 +171,71 @@ fun ReaderScreen(
     val bookmarks = remember(uri, reloadKey) { bookmarkStore.list(uri) }
 
     val listState = rememberLazyListState()
+    val hScroll = rememberScrollState()
     val zoomState = remember { mutableStateOf(1f) }
     val zoom = zoomState.value
 
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
-    val baseWidth = with(density) { configuration.screenWidthDp.dp.roundToPx() }
-    val renderWidth = (baseWidth * zoom).toInt().coerceIn(240, 3600)
+    val baseWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
+    val gapBasePx = with(density) { 8.dp.toPx() }
+    val renderWidth = (baseWidthPx * zoom).toInt().coerceIn(240, 6000)
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+
+    // Base-size (zoom == 1) height of each page plus the gap below it. Everything scales linearly
+    // with zoom, which lets us keep the pinch focal point fixed while the pages are re-rendered.
+    val itemBaseHeights = remember(handle) {
+        (0 until handle.pageCount).map { baseWidthPx.toFloat() * handle.pageAspect(it) + gapBasePx }
+    }
+
+    /** Zooms to [target], keeping the point under [focal] (in viewport px) anchored. */
+    fun applyZoom(target: Float, focal: Offset) {
+        val old = zoomState.value
+        val next = target.coerceIn(1f, 6f)
+        if (abs(next - old) < 0.0001f) return
+        val ratio = next / old
+        val focalX = focal.x.coerceAtLeast(0f)
+        val focalY = focal.y.coerceAtLeast(0f)
+
+        val firstIndex = listState.firstVisibleItemIndex
+            .coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
+        var contentBaseY = 0f
+        for (i in 0 until firstIndex) contentBaseY += itemBaseHeights.getOrElse(i) { gapBasePx }
+        contentBaseY += (listState.firstVisibleItemScrollOffset + focalY) / old
+
+        val targetPx = contentBaseY * next - focalY
+        var acc = 0f
+        var idx = itemBaseHeights.lastIndex.coerceAtLeast(0)
+        var offsetPx = 0f
+        for (i in itemBaseHeights.indices) {
+            val h = itemBaseHeights[i] * next
+            if (acc + h > targetPx) {
+                idx = i
+                offsetPx = targetPx - acc
+                break
+            }
+            acc += h
+        }
+
+        val newScrollX = (hScroll.value + focalX) * ratio - focalX
+        zoomState.value = next
+        scope.launch {
+            // Let the re-render / relayout adopt the new width before restoring the scroll offsets.
+            withFrameNanos { }
+            withFrameNanos { }
+            runCatching { hScroll.scrollTo(newScrollX.roundToInt().coerceAtLeast(0)) }
+            runCatching { listState.scrollToItem(idx, offsetPx.roundToInt().coerceAtLeast(0)) }
+        }
+    }
+
+    /** Two-finger pan while zoomed in (scrolls the document and the horizontal viewport). */
+    fun applyPan(pan: Offset) {
+        if (zoomState.value <= 1.001f) return
+        scope.launch {
+            runCatching { hScroll.scrollBy(-pan.x) }
+            runCatching { listState.scrollBy(-pan.y) }
+        }
+    }
 
     val currentPage = listState.firstVisibleItemIndex.coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
 
@@ -286,10 +354,11 @@ fun ReaderScreen(
                     Icon(Icons.Filled.GridView, contentDescription = "Thumbnails", tint = Color.White)
                 }
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { zoomState.value = (zoom / 1.25f).coerceAtLeast(0.5f) }) {
+                val center = Offset(viewportSize.width / 2f, viewportSize.height / 2f)
+                IconButton(onClick = { applyZoom(zoom / 1.25f, center) }) {
                     Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out", tint = Color.White)
                 }
-                IconButton(onClick = { zoomState.value = (zoom * 1.25f).coerceAtMost(4f) }) {
+                IconButton(onClick = { applyZoom(zoom * 1.25f, center) }) {
                     Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in", tint = Color.White)
                 }
                 Box(
@@ -308,15 +377,22 @@ fun ReaderScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .onSizeChanged { viewportSize = it }
                 .pointerInput(Unit) {
                     awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
+                        // Observe in the Initial pass so a two-finger pinch is claimed before the
+                        // scrollable children can consume it as an ordinary scroll.
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                         do {
-                            val event = awaitPointerEvent()
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
                             if (event.changes.size >= 2) {
                                 val change = event.calculateZoom()
+                                val centroid = event.calculateCentroid(useCurrent = true)
                                 if (change != 1f) {
-                                    zoomState.value = (zoomState.value * change).coerceIn(0.5f, 4f)
+                                    applyZoom(zoomState.value * change, centroid)
+                                } else {
+                                    val pan = event.calculatePan()
+                                    if (pan != Offset.Zero) applyPan(pan)
                                 }
                                 event.changes.forEach { it.consume() }
                             }
@@ -324,19 +400,28 @@ fun ReaderScreen(
                     }
                 },
         ) {
-            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                items(handle.pageCount, key = { it }) { index ->
-                    val pageOverlays = overlays.filter { it.page == index }
-                    val pageHits = hitOverlays.filter { it.page == index }
-                    PageImage(
-                        handle = handle,
-                        index = index,
-                        widthPx = renderWidth,
-                        overlays = pageOverlays,
-                        searchHits = pageHits,
-                        onClick = { showTools = true },
-                    )
-                    Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .horizontalScroll(hScroll),
+            ) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .width(with(density) { renderWidth.toDp() })
+                        .fillMaxHeight(),
+                ) {
+                    items(handle.pageCount, key = { it }) { index ->
+                        PageImage(
+                            handle = handle,
+                            index = index,
+                            widthPx = renderWidth,
+                            overlays = overlays.filter { it.page == index },
+                            searchHits = hitOverlays.filter { it.page == index },
+                            onClick = { showTools = true },
+                        )
+                        Spacer(Modifier.height(with(density) { (gapBasePx * zoom).toDp() }))
+                    }
                 }
             }
             BusyOverlay(busy)
@@ -514,38 +599,30 @@ private fun PageImage(
     val bitmap by produceState<Bitmap?>(initialValue = null, handle, index, widthPx) {
         value = withContext(Dispatchers.IO) { handle.render(index, widthPx) }
     }
-    val hScroll = rememberScrollState()
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(hScroll),
-        contentAlignment = Alignment.TopCenter,
-    ) {
-        val bmp = bitmap
-        if (bmp == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(420.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = Color.White)
-            }
-        } else {
-            Box(
-                modifier = Modifier
-                    .width(with(LocalDensity.current) { widthPx.toDp() })
-                    .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat())
-                    .clickable { onClick() },
-            ) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = "Page ${index + 1}",
-                    contentScale = ContentScale.FillBounds,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                AnnotationLayer(overlays = overlays, searchHits = searchHits)
-            }
+    val bmp = bitmap
+    if (bmp == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(420.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(color = Color.White)
+        }
+    } else {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(bmp.width.toFloat() / bmp.height.toFloat())
+                .clickable { onClick() },
+        ) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = "Page ${index + 1}",
+                contentScale = ContentScale.FillBounds,
+                modifier = Modifier.fillMaxSize(),
+            )
+            AnnotationLayer(overlays = overlays, searchHits = searchHits)
         }
     }
 }
