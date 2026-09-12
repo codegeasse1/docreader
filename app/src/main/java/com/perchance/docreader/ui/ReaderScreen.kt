@@ -74,6 +74,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -181,18 +182,31 @@ fun ReaderScreen(
     val baseWidthPx = with(density) { configuration.screenWidthDp.dp.roundToPx() }
     val gapBasePx = with(density) { 8.dp.toPx() }
     val renderWidth = (baseWidthPx * zoom).toInt().coerceIn(240, 6000)
+    // The bitmap is only re-rendered when the zoom crosses one of these buckets. Re-rendering every
+    // page on every pinch step is what made zooming stutter: each new bitmap briefly replaced the
+    // page with a placeholder, which re-measured the whole list under the user's fingers.
+    val renderBucket = when {
+        zoom <= 1.25f -> 1f
+        zoom <= 2.5f -> 2f
+        zoom <= 4f -> 3f
+        else -> 4f
+    }
+    val bitmapWidth = (baseWidthPx * renderBucket).toInt().coerceIn(240, 4000)
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
 
     // Base-size (zoom == 1) height of each page plus the gap below it. Everything scales linearly
     // with zoom, which lets us keep the pinch focal point fixed while the pages are re-rendered.
-    val itemBaseHeights = remember(handle) {
+    val itemBaseHeights = remember(handle, baseWidthPx) {
         (0 until handle.pageCount).map { baseWidthPx.toFloat() * handle.pageAspect(it) + gapBasePx }
     }
 
     /** Zooms to [target], keeping the point under [focal] (in viewport px) anchored. */
     fun applyZoom(target: Float, focal: Offset) {
         val old = zoomState.value
-        val next = target.coerceIn(1f, 6f)
+        // Snap to 2.5% steps: a pinch fires far more events than the layout needs to follow, and
+        // every change re-measures the pages and re-anchors the scroll offsets. Snapping means most
+        // events are no-ops, which is what keeps the pinch smooth instead of shaky.
+        val next = (target.coerceIn(1f, 6f) * 40f).roundToInt() / 40f
         if (abs(next - old) < 0.0001f) return
         val ratio = next / old
         val focalX = focal.x.coerceAtLeast(0f)
@@ -221,9 +235,8 @@ fun ReaderScreen(
         val newScrollX = (hScroll.value + focalX) * ratio - focalX
         zoomState.value = next
         scope.launch {
-            // Let the re-render / relayout adopt the new width before restoring the scroll offsets.
-            withFrameNanos { }
-            withFrameNanos { }
+            // No frame delay: the coroutine runs at the start of the next frame, so the new zoom
+            // and the corrected scroll offsets are adopted by the same measure pass.
             runCatching { hScroll.scrollTo(newScrollX.roundToInt().coerceAtLeast(0)) }
             runCatching { listState.scrollToItem(idx, offsetPx.roundToInt().coerceAtLeast(0)) }
         }
@@ -232,10 +245,9 @@ fun ReaderScreen(
     /** Two-finger pan while zoomed in (scrolls the document and the horizontal viewport). */
     fun applyPan(pan: Offset) {
         if (zoomState.value <= 1.001f) return
-        scope.launch {
-            runCatching { hScroll.scrollBy(-pan.x) }
-            runCatching { listState.scrollBy(-pan.y) }
-        }
+        // dispatchRawDelta applies immediately, with no coroutine queue to fall behind the fingers.
+        runCatching { hScroll.dispatchRawDelta(-pan.x) }
+        runCatching { listState.dispatchRawDelta(-pan.y) }
     }
 
     val currentPage = listState.firstVisibleItemIndex.coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
@@ -416,7 +428,7 @@ fun ReaderScreen(
                         PageImage(
                             handle = handle,
                             index = index,
-                            widthPx = renderWidth,
+                            renderPx = bitmapWidth,
                             overlays = overlays.filter { it.page == index },
                             searchHits = hitOverlays.filter { it.page == index },
                             onClick = { showTools = true },
@@ -592,15 +604,19 @@ fun ReaderScreen(
 private fun PageImage(
     handle: PdfDocumentHandle,
     index: Int,
-    widthPx: Int,
+    renderPx: Int,
     overlays: List<Overlay>,
     searchHits: List<Overlay>,
     onClick: () -> Unit,
 ) {
-    val bitmap by produceState<Bitmap?>(initialValue = null, handle, index, widthPx) {
-        value = withContext(Dispatchers.IO) { handle.render(index, widthPx) }
+    // Keep the bitmap that is already on screen while a sharper one is being rendered, so zooming
+    // never collapses the page into a placeholder.
+    val bitmap = remember(index) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(handle, index, renderPx) {
+        val fresh = withContext(Dispatchers.IO) { handle.render(index, renderPx) }
+        if (fresh != null) bitmap.value = fresh
     }
-    val bmp = bitmap
+    val bmp = bitmap.value
     if (bmp == null) {
         Box(
             modifier = Modifier

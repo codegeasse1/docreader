@@ -11,8 +11,8 @@ enum class AnnKind { TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT }
  * [points] is a flattened list of x,y pairs (normalized) and is only used by [AnnKind.PEN].
  *
  * [fontSize] is only used by [AnnKind.TEXT]: it is the text height as a fraction of the page
- * height (display space), so a note keeps its apparent size at any zoom level. Two fingers pinch
- * a note to grow/shrink both its box and its text together.
+ * height (display space), so a note keeps its apparent size at any zoom level. The A+ / A- / Reset
+ * buttons scale the selected note's box and text together, and dragging its corner dot resizes it.
  */
 data class Overlay(
     val id: String,

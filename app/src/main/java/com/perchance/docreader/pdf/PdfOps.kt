@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.perchance.docreader.data.formatSize
 import com.tom_roush.pdfbox.cos.COSName
+import com.tom_roush.pdfbox.multipdf.PDFMergerUtility
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
@@ -33,6 +34,7 @@ import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
 import java.io.OutputStream
 import java.util.Calendar
 import java.util.Locale
@@ -388,20 +390,66 @@ object PdfOps {
 
     // ---------------------------------------------------------------- merge / split
 
-    /** Concatenates [uris] (in order) into one new PDF written to [dest]. */
+    /**
+     * Concatenates [uris] (in order) into one new PDF written to [dest].
+     *
+     * Uses [PDFMergerUtility], which deep-clones every page (including its resources) into the new
+     * document, and falls back to a manual page import if the merger trips over an odd document.
+     * The manual path keeps every source open until the result has been written — importing a page
+     * and then closing its source document leaves the destination holding references into a closed
+     * document, which makes `save` fail.
+     */
     fun merge(ctx: Context, uris: List<Uri>, password: String?, dest: Uri) {
-        PDDocument().use { out ->
-            for (u in uris) {
-                val f = cacheFile(ctx, u)
-                try {
-                    PDDocument.load(f, password).use { src ->
-                        for (i in 0 until src.numberOfPages) out.importPage(src.getPage(i))
-                    }
-                } finally {
-                    f.delete()
+        require(uris.isNotEmpty()) { "Pick at least two documents" }
+        val srcs = ArrayList<File>()
+        try {
+            for ((i, u) in uris.withIndex()) {
+                val f = runCatching { cacheFile(ctx, u, "merge${i}_") }
+                    .getOrElse { throw IOException("Could not read document ${i + 1}: ${it.message ?: "unknown error"}") }
+                srcs.add(f)
+            }
+            // The merger only flushes the stream, so closing it ourselves is what guarantees the
+            // bytes actually land in the destination file.
+            val merged = runCatching {
+                outStream(ctx, dest).use { out ->
+                    val merger = PDFMergerUtility()
+                    for (f in srcs) merger.addSource(f)
+                    merger.destinationStream = out
+                    merger.mergeDocuments(null)
                 }
             }
-            outStream(ctx, dest).use { out.save(it) }
+            merged.getOrElse { first -> importMerge(ctx, srcs, password, dest, first) }
+        } finally {
+            for (f in srcs) runCatching { f.delete() }
+        }
+    }
+
+    /** Fallback merge that imports pages by hand, keeping every source open until after [dest] is written. */
+    private fun importMerge(
+        ctx: Context,
+        srcs: List<File>,
+        password: String?,
+        dest: Uri,
+        firstFailure: Throwable,
+    ) {
+        val open = ArrayList<PDDocument>()
+        try {
+            for (f in srcs) {
+                open.add(
+                    runCatching { PDDocument.load(f, password) }.getOrElse {
+                        throw IOException("Could not read one of the documents: ${it.message ?: firstFailure.message ?: "unknown error"}")
+                    },
+                )
+            }
+            PDDocument().use { out ->
+                for (doc in open) {
+                    for (i in 0 until doc.numberOfPages) out.importPage(doc.getPage(i))
+                }
+                if (out.numberOfPages == 0) throw IOException("The documents had no pages to merge")
+                outStream(ctx, dest).use { out.save(it) }
+            }
+        } finally {
+            for (doc in open) runCatching { doc.close() }
         }
     }
 
