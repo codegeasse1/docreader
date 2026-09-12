@@ -6,23 +6,50 @@ import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import com.tom_roush.pdfbox.pdmodel.PDDocument
 import java.io.Closeable
+import java.io.File
 
 /**
- * Thin wrapper around Android's built-in PdfRenderer (API 21+).
- * No third-party PDF library is required, so the APK stays small.
+ * Thin wrapper around Android's built-in PdfRenderer (API 21+), so page rendering needs no
+ * third-party library at all. When [password] is given the document is first decrypted by
+ * PdfBox into a private cache file, because PdfRenderer cannot open encrypted files.
  *
  * Keep one instance open per document and call [close] when leaving the reader.
  */
-class PdfDocumentHandle(context: Context, uri: Uri) : Closeable {
+class PdfDocumentHandle(context: Context, uri: Uri, password: String? = null) : Closeable {
 
-    private val descriptor: ParcelFileDescriptor =
-        context.contentResolver.openFileDescriptor(uri, "r")
-            ?: error("Could not open document: $uri")
+    private var tempFile: File? = null
+    private val descriptor: ParcelFileDescriptor
+    private val renderer: PdfRenderer
 
-    private val renderer = PdfRenderer(descriptor)
+    init {
+        var tmp: File? = null
+        val desc: ParcelFileDescriptor
+        if (password.isNullOrEmpty()) {
+            desc = context.contentResolver.openFileDescriptor(uri, "r")
+                ?: error("Could not open the document")
+        } else {
+            val decrypted = File.createTempFile("docreader_dec_", ".pdf", context.cacheDir)
+            val input = context.contentResolver.openInputStream(uri)
+                ?: error("Could not read the document")
+            input.use { stream ->
+                PDDocument.load(stream, password).use { doc -> doc.save(decrypted) }
+            }
+            tmp = decrypted
+            desc = ParcelFileDescriptor.open(decrypted, ParcelFileDescriptor.MODE_READ_ONLY)
+        }
+        tempFile = tmp
+        descriptor = desc
+        renderer = PdfRenderer(desc)
+    }
 
     val pageCount: Int get() = renderer.pageCount
+
+    /** Page size in points (72 dpi), used by the print adapter. */
+    fun pageSize(index: Int): Pair<Int, Int>? = runCatching {
+        renderer.openPage(index).use { it.width to it.height }
+    }.getOrNull()
 
     /** Renders [index] scaled to [targetWidth] px wide. Returns null if rendering fails. */
     fun render(index: Int, targetWidth: Int): Bitmap? {
@@ -42,5 +69,7 @@ class PdfDocumentHandle(context: Context, uri: Uri) : Closeable {
     override fun close() {
         runCatching { renderer.close() }
         runCatching { descriptor.close() }
+        runCatching { tempFile?.delete() }
+        tempFile = null
     }
 }

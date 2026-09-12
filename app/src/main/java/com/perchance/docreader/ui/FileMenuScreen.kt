@@ -2,6 +2,8 @@ package com.perchance.docreader.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,10 +26,12 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Comment
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Save
@@ -35,15 +39,19 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.ViewModule
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -59,10 +67,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.perchance.docreader.data.AnnotationStore
+import com.perchance.docreader.data.BookmarkStore
 import com.perchance.docreader.data.RecentStore
 import com.perchance.docreader.data.formatSize
 import com.perchance.docreader.data.queryFileMeta
+import com.perchance.docreader.pdf.PdfOps
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,28 +84,144 @@ fun FileMenuScreen(
     name: String,
     onBack: () -> Unit,
     onOpenReader: () -> Unit,
+    onOpenAnnotate: () -> Unit,
+    onOpenOrganize: () -> Unit,
+    onOpenFillForm: () -> Unit,
+    onOpenSign: () -> Unit,
 ) {
     val context = LocalContext.current
     val store = remember { RecentStore(context.applicationContext) }
+    val annStore = remember { AnnotationStore(context.applicationContext) }
+    val bookmarkStore = remember { BookmarkStore(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val documentUri = remember(uri) { Uri.parse(uri) }
 
-    val (_, size) = remember(uri) { queryFileMeta(context, Uri.parse(uri)) }
+    val (_, size) = remember(uri) { queryFileMeta(context, documentUri) }
     var starred by remember(uri) {
         mutableStateOf(store.list().firstOrNull { it.uri == uri }?.starred == true)
     }
+    var busy by remember { mutableStateOf<String?>(null) }
+    var infoText by remember { mutableStateOf<String?>(null) }
+    var annotationsOpen by remember { mutableStateOf(false) }
+
+    // ---- pending operation payloads (consumed by the launchers below) ----
+    var pendingMerge by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var pendingRange by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var pendingPassword by remember { mutableStateOf<String?>(null) }
+    var compressWidth by remember { mutableStateOf(1400) }
+    var compressQuality by remember { mutableStateOf(72) }
+
+    fun base() = name.replace(".pdf", "", ignoreCase = true)
+
+    val saveAs = rememberCreateDocument("application/pdf") { dest ->
+        scope.launch {
+            busy = "Saving copy…"
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    context.contentResolver.openInputStream(documentUri)?.use { input ->
+                        context.contentResolver.openOutputStream(dest)?.use { output -> input.copyTo(output) }
+                    }
+                }.isSuccess
+            }
+            busy = null
+            snackbar.showSnackbar(if (ok) "Copy saved" else "Could not save copy")
+        }
+    }
+    val mergeDest = rememberCreateDocument("application/pdf") { dest ->
+        val sources = pendingMerge
+        if (sources.isNotEmpty()) {
+            scope.launch {
+                busy = "Merging ${sources.size} files…"
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { PdfOps.merge(context, sources, null, dest) }.isSuccess
+                }
+                busy = null
+                pendingMerge = emptyList()
+                snackbar.showSnackbar(if (ok) "Merged ${sources.size} files" else "Merge failed")
+            }
+        }
+    }
+    val mergePick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            pendingMerge = listOf(documentUri) + uris
+            mergeDest.launch("${base()}_merged.pdf")
+        }
+    }
+    val extractDest = rememberCreateDocument("application/pdf") { dest ->
+        val range = pendingRange
+        if (range != null) {
+            scope.launch {
+                busy = "Extracting…"
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { PdfOps.extractRange(context, documentUri, range.first, range.second, null, dest) }.isSuccess
+                }
+                busy = null
+                pendingRange = null
+                snackbar.showSnackbar(if (ok) "Extracted" else "Extract failed")
+            }
+        }
+    }
+    val folderPick = rememberPickFolder { dir ->
+        scope.launch {
+            busy = "Splitting pages…"
+            val written = withContext(Dispatchers.IO) {
+                runCatching { PdfOps.splitToPages(context, documentUri, null, dir, name) }.getOrDefault(emptyList())
+            }
+            busy = null
+            snackbar.showSnackbar("Wrote ${written.size} file(s)")
+        }
+    }
+    val compressDest = rememberCreateDocument("application/pdf") { dest ->
+        scope.launch {
+            busy = "Compressing…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    PdfOps.compress(context, documentUri, null, compressWidth, compressQuality, dest)
+                }.getOrNull()
+            }
+            busy = null
+            infoText = if (result != null) {
+                "Compressed: ${formatSize(result.first)} → ${formatSize(result.second)}"
+            } else {
+                "Compression failed"
+            }
+        }
+    }
+    val passwordDest = rememberCreateDocument("application/pdf") { dest ->
+        val pwd = pendingPassword
+        if (!pwd.isNullOrEmpty()) {
+            scope.launch {
+                busy = "Encrypting…"
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { PdfOps.setPassword(context, documentUri, null, pwd, pwd, dest) }.isSuccess
+                }
+                busy = null
+                pendingPassword = null
+                snackbar.showSnackbar(if (ok) "Password set" else "Could not set password")
+            }
+        }
+    }
+    val unlockDest = rememberCreateDocument("application/pdf") { dest ->
+        scope.launch {
+            busy = "Removing protection…"
+            val ok = withContext(Dispatchers.IO) {
+                runCatching { PdfOps.removePassword(context, documentUri, null, dest) }.isSuccess
+            }
+            busy = null
+            snackbar.showSnackbar(if (ok) "Protection removed" else "Could not remove protection")
+        }
+    }
+
+    var dialog by remember { mutableStateOf<String?>(null) }
 
     fun share() {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/pdf"
-            putExtra(Intent.EXTRA_STREAM, Uri.parse(uri))
+            putExtra(Intent.EXTRA_STREAM, documentUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "Share document"))
-    }
-
-    fun soon(label: String) {
-        scope.launch { snackbar.showSnackbar("$label — coming soon in this scaffold") }
     }
 
     Scaffold(
@@ -100,7 +229,7 @@ fun FileMenuScreen(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
-                title = { },
+                title = { Text(name, maxLines = 1, fontSize = 15.sp) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
@@ -109,63 +238,67 @@ fun FileMenuScreen(
             )
         },
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    Icons.Filled.PictureAsPdf,
-                    contentDescription = null,
-                    tint = Color(0xFFC62828),
-                    modifier = Modifier.size(40.dp),
-                )
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    Text(name, fontWeight = FontWeight.Bold, maxLines = 1)
-                    Text(
-                        formatSize(size),
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.PictureAsPdf,
+                        contentDescription = null,
+                        tint = Color(0xFFC62828),
+                        modifier = Modifier.size(40.dp),
                     )
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text(name, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text(
+                            formatSize(size),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
-            }
 
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                RoundAction(Icons.Filled.List, "Content") { onOpenReader() }
-                RoundAction(Icons.Filled.Share, "Share") { share() }
-                RoundAction(Icons.Filled.GridView, "Thumbnail") { onOpenReader() }
-                RoundAction(Icons.Filled.Save, "Save as") { soon("Save as") }
-            }
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                ) {
+                    RoundAction(Icons.Filled.List, "Content") { onOpenReader() }
+                    RoundAction(Icons.Filled.Share, "Share") { share() }
+                    RoundAction(Icons.Filled.GridView, "Thumbnail") { onOpenReader() }
+                    RoundAction(Icons.Filled.Save, "Save as") { saveAs.launch("${base()}_copy.pdf") }
+                }
 
-            Spacer(Modifier.height(18.dp))
-            HorizontalDivider()
+                Spacer(Modifier.height(18.dp))
+                HorizontalDivider()
 
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                val entries = listOf(
-                    MenuEntry(Icons.Filled.Add, "Merge Documents"),
-                    MenuEntry(Icons.Filled.ContentCut, "Split Document"),
-                    MenuEntry(Icons.Filled.Compress, "File Compressor"),
-                    MenuEntry(Icons.Filled.Print, "Print"),
-                    MenuEntry(Icons.Filled.Bookmark, "Add Bookmark"),
-                    MenuEntry(Icons.Filled.Lock, "Set password"),
-                    MenuEntry(Icons.Filled.ViewModule, "Organize pages"),
-                    MenuEntry(Icons.Filled.Comment, "Annotation list"),
-                )
-                items(entries.size) { i ->
-                    val entry = entries[i]
-                    MenuRow(entry.icon, entry.label) { soon(entry.label) }
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    MenuRow(Icons.Filled.Add, "Merge Documents") { mergePick.launch(arrayOf("application/pdf")) }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                }
-                item {
+                    MenuRow(Icons.Filled.ContentCut, "Split Document") { dialog = "split" }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Compress, "File Compressor") { dialog = "compress" }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Print, "Print") {
+                        runCatching { printPdf(context, documentUri, name, null) }
+                            .onFailure { scope.launch { snackbar.showSnackbar("Print failed") } }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Bookmark, "Add Bookmark") { dialog = "bookmark" }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Lock, "Set password") { dialog = "password" }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.LockOpen, "Remove password") {
+                        unlockDest.launch("${base()}_unlocked.pdf")
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.ViewModule, "Organize pages") { onOpenOrganize() }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Comment, "Annotation list") { annotationsOpen = true }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     MenuRow(
                         if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
                         if (starred) "Unstar" else "Star",
@@ -175,17 +308,243 @@ fun FileMenuScreen(
                         starred = !starred
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                }
-                item {
-                    MenuRow(Icons.Filled.Info, "File info") { soon("File info") }
+                    MenuRow(Icons.Filled.Info, "File info") {
+                        scope.launch {
+                            busy = "Reading info…"
+                            val info = withContext(Dispatchers.IO) {
+                                runCatching { PdfOps.info(context, documentUri) }.getOrNull()
+                            }
+                            busy = null
+                            infoText = info?.entries?.joinToString("\n") { "${it.key}: ${it.value}" } ?: "Could not read info"
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Save, "Edit & annotate") { onOpenAnnotate() }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Add, "Fill form") { onOpenFillForm() }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Info, "Sign document") { onOpenSign() }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 }
             }
+            BusyOverlay(busy)
         }
+    }
+
+    when (dialog) {
+        "split" -> SplitDialog(
+            onExtractRange = { from, to ->
+                dialog = null
+                pendingRange = from to to
+                extractDest.launch("${base()}_pages.pdf")
+            },
+            onSplitFolder = {
+                dialog = null
+                folderPick.launch(null)
+            },
+            onDismiss = { dialog = null },
+        )
+
+        "compress" -> CompressDialog(
+            onConfirm = { choice ->
+                dialog = null
+                if (choice == 0) {
+                    compressWidth = 1400
+                    compressQuality = 72
+                } else {
+                    compressWidth = 900
+                    compressQuality = 52
+                }
+                compressDest.launch("${base()}_compressed.pdf")
+            },
+            onDismiss = { dialog = null },
+        )
+
+        "bookmark" -> BookmarkDialog(
+            onAdd = { page ->
+                dialog = null
+                bookmarkStore.toggle(uri, (page - 1).coerceAtLeast(0), "Page $page")
+                scope.launch { snackbar.showSnackbar("Bookmark added") }
+            },
+            onDismiss = { dialog = null },
+        )
+
+        "password" -> PasswordSetDialog(
+            onSet = { pwd ->
+                dialog = null
+                pendingPassword = pwd
+                passwordDest.launch("${base()}_protected.pdf")
+            },
+            onDismiss = { dialog = null },
+        )
+    }
+
+    infoText?.let { text ->
+        AlertDialog(
+            onDismissRequest = { infoText = null },
+            title = { Text("Result") },
+            text = { Text(text) },
+            confirmButton = { TextButton(onClick = { infoText = null }) { Text("OK") } },
+        )
+    }
+
+    if (annotationsOpen) {
+        val overlays = remember(uri) { annStore.list(uri) }
+        AlertDialog(
+            onDismissRequest = { annotationsOpen = false },
+            title = { Text("Annotations (${overlays.size})") },
+            text = {
+                if (overlays.isEmpty()) {
+                    Text("No annotations yet. Use Edit & annotate to add some.")
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().height(300.dp)) {
+                        items(overlays.size) { i ->
+                            val o = overlays[i]
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(modifier = Modifier.size(14.dp).background(Color(o.color), CircleShape))
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(o.kind.name.lowercase().replaceFirstChar { it.uppercase() }, fontSize = 13.sp)
+                                    Text(
+                                        "Page ${o.page + 1}${if (o.text.isNotBlank()) " · ${o.text}" else ""}",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                    )
+                                }
+                                IconButton(onClick = { annStore.remove(uri, o.id); annotationsOpen = false }) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { annotationsOpen = false }) { Text("Close") } },
+        )
     }
 }
 
-private data class MenuEntry(val icon: ImageVector, val label: String)
+@Composable
+private fun SplitDialog(
+    onExtractRange: (Int, Int) -> Unit,
+    onSplitFolder: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var from by remember { mutableStateOf("1") }
+    var to by remember { mutableStateOf("1") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Split document") },
+        text = {
+            Column {
+                Text("Extract a page range into a new PDF:")
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = from,
+                        onValueChange = { from = it.filter(Char::isDigit) },
+                        label = { Text("From") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = to,
+                        onValueChange = { to = it.filter(Char::isDigit) },
+                        label = { Text("To") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onSplitFolder) {
+                    Text("Or split every page into a folder…")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val f = ((from.toIntOrNull() ?: 1) - 1).coerceAtLeast(0)
+                val t = ((to.toIntOrNull() ?: from.toIntOrNull() ?: 1) - 1).coerceAtLeast(f)
+                onExtractRange(f, t)
+            }) { Text("Extract") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun CompressDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val options = listOf("Balanced (1400 px, JPEG 72)", "Smallest file")
+    var choice by remember { mutableStateOf(0) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Compress PDF") },
+        text = {
+            Column {
+                Text("Pages are rasterised, so text stops being selectable but the file shrinks a lot.")
+                Spacer(Modifier.height(10.dp))
+                options.forEachIndexed { index, label ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = choice == index, onClick = { choice = index })
+                        Text(label)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Compress") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun BookmarkDialog(onAdd: (Int) -> Unit, onDismiss: () -> Unit) {
+    var page by remember { mutableStateOf("1") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add bookmark") },
+        text = {
+            OutlinedTextField(
+                value = page,
+                onValueChange = { page = it.filter(Char::isDigit) },
+                label = { Text("Page number") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onAdd(page.toIntOrNull() ?: 1) }) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun PasswordSetDialog(onSet: (String) -> Unit, onDismiss: () -> Unit) {
+    var pwd by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set password") },
+        text = {
+            Column {
+                Text("A copy of the document will be protected with this password (AES-128).")
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = pwd,
+                    onValueChange = { pwd = it },
+                    label = { Text("Password") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (pwd.isNotBlank()) onSet(pwd) }) { Text("Set") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
 
 @Composable
 private fun RoundAction(icon: ImageVector, label: String, onClick: () -> Unit) {
