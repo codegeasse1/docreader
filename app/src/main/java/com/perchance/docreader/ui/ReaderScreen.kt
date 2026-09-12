@@ -187,11 +187,13 @@ fun ReaderScreen(
     // page with a placeholder, which re-measured the whole list under the user's fingers.
     val renderBucket = when {
         zoom <= 1.25f -> 1f
-        zoom <= 2.5f -> 2f
-        zoom <= 4f -> 3f
-        else -> 4f
+        zoom <= 2.2f -> 1.5f
+        zoom <= 3.5f -> 2.1f
+        else -> 2.8f
     }
-    val bitmapWidth = (baseWidthPx * renderBucket).toInt().coerceIn(240, 4000)
+    // Capped so a deep zoom can't allocate a 100 MB bitmap per page (ARGB_8888 is 4 bytes/px);
+    // 2200 px over an A4 page is still ~3.4 px/pt, which stays readable at 6x.
+    val bitmapWidth = (baseWidthPx * renderBucket).toInt().coerceIn(240, 2200)
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
 
     // Base-size (zoom == 1) height of each page plus the gap below it. Everything scales linearly
