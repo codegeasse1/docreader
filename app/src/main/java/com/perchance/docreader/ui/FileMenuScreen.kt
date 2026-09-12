@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Lock
@@ -160,6 +161,14 @@ fun FileMenuScreen(
             snackbar.showSnackbar("Wrote ${written.size} file(s)")
         }
     }
+    val imagePagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) {
+            produce("PDF with images", "${base()}_images.pdf") { dest ->
+                val added = PdfOps.insertImages(context, documentUri, null, uris, dest)
+                "Added $added new page${if (added == 1) "" else "s"}"
+            }
+        }
+    }
 
     var dialog by remember { mutableStateOf<String?>(null) }
 
@@ -238,6 +247,8 @@ fun FileMenuScreen(
                         .verticalScroll(rememberScrollState()),
                 ) {
                     MenuRow(Icons.Filled.Add, "Merge Documents") { mergePick.launch(arrayOf("application/pdf")) }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    MenuRow(Icons.Filled.Image, "Add image pages") { imagePagePicker.launch("image/*") }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                     MenuRow(Icons.Filled.ContentCut, "Split Document") { dialog = "split" }
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)

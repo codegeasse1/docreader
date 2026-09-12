@@ -178,6 +178,46 @@ object PdfOps {
         return pages
     }
 
+    /**
+     * Appends one page per image in [images] to an existing document, writing the combined PDF to
+     * [dest]. Used by "Add image pages", so an existing (e.g. freshly created blank) PDF can be
+     * filled with photos without starting over. Returns the number of pages that were added.
+     */
+    fun insertImages(
+        ctx: Context,
+        uri: Uri,
+        password: String?,
+        images: List<Uri>,
+        dest: Uri,
+        maxDimension: Int = 2400,
+    ): Int {
+        if (images.isEmpty()) error("Pick at least one image")
+        val src = cacheFile(ctx, uri, "edit")
+        var added = 0
+        try {
+            PDDocument.load(src, password).use { doc ->
+                for ((i, u) in images.withIndex()) {
+                    val raw = decodeScaled(ctx, u, maxDimension) ?: continue
+                    val bmp = flattenOnWhite(raw)
+                    val img = PDImageXObject.createFromByteArray(doc, jpegBytes(bmp, 88), "ins$i")
+                    val widthPt = PDRectangle.A4.width
+                    val heightPt = widthPt * (img.height.toFloat() / img.width.toFloat())
+                    val page = PDPage(PDRectangle(widthPt, heightPt))
+                    doc.addPage(page)
+                    PDPageContentStream(doc, page).use { cs -> cs.drawImage(img, 0f, 0f, widthPt, heightPt) }
+                    bmp.recycle()
+                    if (bmp !== raw) raw.recycle()
+                    added++
+                }
+                if (added == 0) error("None of the chosen images could be read")
+                outStream(ctx, dest).use { doc.save(it) }
+            }
+        } finally {
+            src.delete()
+        }
+        return added
+    }
+
     private fun decodeScaled(ctx: Context, uri: Uri, maxDimension: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         runCatching {
