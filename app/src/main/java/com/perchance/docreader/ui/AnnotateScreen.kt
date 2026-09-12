@@ -34,12 +34,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoFixNormal
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.NavigateBefore
 import androidx.compose.material.icons.filled.NavigateNext
 import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.StrikethroughS
 import androidx.compose.material.icons.filled.TextFields
@@ -83,8 +85,14 @@ import androidx.compose.ui.unit.sp
 import com.perchance.docreader.data.AnnotationStore
 import com.perchance.docreader.pdf.ANNOTATION_COLORS
 import com.perchance.docreader.pdf.AnnKind
+import com.perchance.docreader.pdf.DEFAULT_ERASER_SIZE
+import com.perchance.docreader.pdf.DEFAULT_STROKE_WIDTH
 import com.perchance.docreader.pdf.DEFAULT_TEXT_SIZE
+import com.perchance.docreader.pdf.MAX_ERASER_SIZE
+import com.perchance.docreader.pdf.MAX_STROKE_WIDTH
 import com.perchance.docreader.pdf.MAX_TEXT_SIZE
+import com.perchance.docreader.pdf.MIN_ERASER_SIZE
+import com.perchance.docreader.pdf.MIN_STROKE_WIDTH
 import com.perchance.docreader.pdf.MIN_TEXT_SIZE
 import com.perchance.docreader.pdf.Overlay
 import com.perchance.docreader.pdf.PdfDocumentHandle
@@ -97,7 +105,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
-private enum class AnnTool { MOVE, TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT }
+private enum class AnnTool { MOVE, TEXT, PEN, HIGHLIGHT, UNDERLINE, STRIKEOUT, ERASER }
 
 /** A point in normalized page space where a new note was requested. */
 private data class TextSpot(val x: Float, val y: Float)
@@ -141,7 +149,8 @@ fun AnnotateScreen(
 
         var tool by remember { mutableStateOf(AnnTool.PEN) }
         var color by remember { mutableStateOf(ANNOTATION_COLORS.first()) }
-        var width by remember { mutableStateOf(0.02f) }
+        var width by remember { mutableStateOf(DEFAULT_STROKE_WIDTH) }
+        var eraser by remember { mutableStateOf(DEFAULT_ERASER_SIZE) }
         var textSize by remember { mutableStateOf(DEFAULT_TEXT_SIZE) }
         var selectedId by remember { mutableStateOf<String?>(null) }
         var pageAspect by remember { mutableStateOf(0.72f) }
@@ -149,10 +158,20 @@ fun AnnotateScreen(
         var editing by remember { mutableStateOf<Overlay?>(null) }
         var busy by remember { mutableStateOf<String?>(null) }
         val pendingResult = remember { mutableStateOf<File?>(null) }
+        val pendingImage = remember { mutableStateOf<File?>(null) }
+        var notice by remember { mutableStateOf<String?>(null) }
 
         val page = pagerState.currentPage
         val selected = overlays.firstOrNull { it.id == selectedId }
-        val sizeLabel = "${(textSize / DEFAULT_TEXT_SIZE * 100f).roundToInt()}%"
+        val textSizeLabel = "${(textSize / DEFAULT_TEXT_SIZE * 100f).roundToInt()}%"
+        val erasing = tool == AnnTool.ERASER
+        val sizingTool = erasing || usesStroke(tool)
+        val sizeValue = if (erasing) eraser else width
+        val sizeLabel = if (erasing) {
+            "${(eraser / DEFAULT_ERASER_SIZE * 100f).roundToInt()}%"
+        } else {
+            "${(width / DEFAULT_STROKE_WIDTH * 100f).roundToInt()}%"
+        }
 
         fun commit(overlay: Overlay) {
             annStore.add(uri, overlay)
@@ -218,6 +237,20 @@ fun AnnotateScreen(
             )
         }
 
+        /** Sets the stroke width (or the eraser radius) used by the active tool. */
+        fun stepSize(factor: Float) {
+            if (erasing) {
+                eraser = (eraser * factor).coerceIn(MIN_ERASER_SIZE, MAX_ERASER_SIZE)
+            } else {
+                width = (width * factor).coerceIn(MIN_STROKE_WIDTH, MAX_STROKE_WIDTH)
+            }
+        }
+
+        /** Puts the active tool's size back to its default. */
+        fun resetSize() {
+            if (erasing) eraser = DEFAULT_ERASER_SIZE else width = DEFAULT_STROKE_WIDTH
+        }
+
         fun exportPdf() {
             scope.launch {
                 busy = "Writing annotations…"
@@ -238,6 +271,39 @@ fun AnnotateScreen(
                     pendingResult.value = out
                 } else {
                     runCatching { out.delete() }
+                    notice = "Could not export the annotated PDF."
+                }
+            }
+        }
+
+        /** Saves the current page — annotations included — as a PNG and previews it. */
+        fun exportPageImage() {
+            scope.launch {
+                busy = "Rendering page ${page + 1} as an image…"
+                val out = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val f = File.createTempFile("docreader_page_", ".png", context.cacheDir)
+                        val written = PdfOps.exportImages(
+                            ctx = context,
+                            uri = Uri.parse(uri),
+                            overlays = annStore.list(uri),
+                            password = password,
+                            pages = listOf(page),
+                            targetWidth = 1600,
+                            dest = Uri.fromFile(f),
+                            folder = false,
+                            baseName = name.substringBeforeLast('.'),
+                        )
+                        if (written <= 0) error("Could not render the page")
+                        f
+                    }.getOrNull()
+                }
+                busy = null
+                if (out == null || out.length() == 0L) {
+                    runCatching { out?.delete() }
+                    notice = "Could not export this page as an image."
+                } else {
+                    pendingImage.value = out
                 }
             }
         }
@@ -273,7 +339,10 @@ fun AnnotateScreen(
                             Icon(Icons.Filled.Undo, contentDescription = "Undo")
                         }
                         IconButton(onClick = { exportPdf() }) {
-                            Icon(Icons.Filled.Save, contentDescription = "Save as PDF")
+                            Icon(Icons.Filled.Save, contentDescription = "Export as PDF")
+                        }
+                        IconButton(onClick = { exportPageImage() }) {
+                            Icon(Icons.Filled.Photo, contentDescription = "Export this page as an image")
                         }
                         IconButton(
                             onClick = {
@@ -333,13 +402,65 @@ fun AnnotateScreen(
                             Spacer(Modifier.width(6.dp))
                             StepButton("Reset") { resetTextSize() }
                             Spacer(Modifier.width(10.dp))
-                            Text(sizeLabel, color = Color(0xFF8AB4F8), fontSize = 12.sp)
+                            Text(textSizeLabel, color = Color(0xFF8AB4F8), fontSize = 12.sp)
                             Spacer(Modifier.width(12.dp))
                             Text(
                                 if (selected != null) {
                                     "Adjusts the selected note"
                                 } else {
                                     "Sets new notes — tap a note to select it"
+                                },
+                                color = Color(0x99FFFFFF),
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                    if (sizingTool) {
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (erasing) "Eraser size" else "Size",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            StepButton("-") { stepSize(1f / 1.25f) }
+                            Spacer(Modifier.width(6.dp))
+                            StepButton("+") { stepSize(1.25f) }
+                            Spacer(Modifier.width(6.dp))
+                            StepButton("Reset") { resetSize() }
+                            Spacer(Modifier.width(10.dp))
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.size(34.dp),
+                            ) {
+                                val dot = (sizeValue * 300f).coerceIn(4f, 30f).dp
+                                Box(
+                                    modifier = Modifier
+                                        .size(dot)
+                                        .then(
+                                            if (erasing) {
+                                                Modifier.border(1.5.dp, Color(0xFF8AB4F8), CircleShape)
+                                            } else {
+                                                Modifier.background(Color(color), CircleShape)
+                                            },
+                                        ),
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text(sizeLabel, color = Color(0xFF8AB4F8), fontSize = 12.sp)
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                if (erasing) {
+                                    "Tap or drag over anything to rub it out"
+                                } else {
+                                    "Stroke width of the pen, highlighter, underline and strike"
                                 },
                                 color = Color(0x99FFFFFF),
                                 fontSize = 11.sp,
@@ -358,9 +479,26 @@ fun AnnotateScreen(
                             ToolButton(t, tool) { tool = it }
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        StepButton("Export PDF") { exportPdf() }
+                        StepButton("Export this page as image") { exportPageImage() }
+                        Text(
+                            "Both include your annotations",
+                            color = Color(0x99FFFFFF),
+                            fontSize = 11.sp,
+                        )
+                    }
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Drag a note to move it, drag its corner dot to resize, pinch with two fingers to zoom the page",
+                        "Drag a note to move it, drag its corner dot to resize, pinch with two fingers to zoom the page. The eraser removes anything it touches.",
                         color = Color(0x88FFFFFF),
                         fontSize = 10.sp,
                         modifier = Modifier.padding(horizontal = 12.dp),
@@ -377,10 +515,12 @@ fun AnnotateScreen(
                         tool = tool,
                         color = color,
                         width = width,
+                        eraser = eraser,
                         selectedId = selectedId,
                         onSelect = { selectedId = it },
                         onCommit = { commit(it) },
                         onUpdate = { update(it) },
+                        onErase = { delete(it.id) },
                         onTapText = { pendingText = it },
                         onEditText = { editing = it },
                         onAspect = { if (abs(pageAspect - it) > 0.001f) pageAspect = it },
@@ -461,6 +601,29 @@ fun AnnotateScreen(
                 },
             )
         }
+
+        pendingImage.value?.let { result ->
+            ResultPreview(
+                file = result,
+                title = "Page image",
+                suggestedName = name.replace(".pdf", "", ignoreCase = true) + "_page${page + 1}.png",
+                mime = "image/png",
+                note = "Page ${page + 1} of ${handle.pageCount} · annotations included",
+                onDiscard = {
+                    runCatching { result.delete() }
+                    pendingImage.value = null
+                },
+            )
+        }
+
+        notice?.let { message ->
+            AlertDialog(
+                onDismissRequest = { notice = null },
+                title = { Text("Export") },
+                text = { Text(message) },
+                confirmButton = { TextButton(onClick = { notice = null }) { Text("OK") } },
+            )
+        }
     }
 }
 
@@ -499,10 +662,12 @@ private fun AnnotatedPage(
     tool: AnnTool,
     color: Long,
     width: Float,
+    eraser: Float,
     selectedId: String?,
     onSelect: (String?) -> Unit,
     onCommit: (Overlay) -> Unit,
     onUpdate: (Overlay) -> Unit,
+    onErase: (Overlay) -> Unit,
     onTapText: (TextSpot) -> Unit,
     onEditText: (Overlay) -> Unit,
     onAspect: (Float) -> Unit,
@@ -524,6 +689,8 @@ private fun AnnotatedPage(
     val currentTool by rememberUpdatedState(tool)
     val currentColor by rememberUpdatedState(color)
     val currentWidth by rememberUpdatedState(width)
+    val currentEraser by rememberUpdatedState(eraser)
+    val currentOnErase by rememberUpdatedState(onErase)
 
     Box(
         modifier = Modifier
@@ -592,6 +759,34 @@ private fun AnnotatedPage(
                             zoom = z1
                         }
 
+                        /** Rubs out every overlay the eraser (a circle of the current size) touches. */
+                        fun eraseAt(nx: Float, ny: Float) {
+                            val r = currentEraser
+                            val rx = r
+                            // Same physical radius on both axes, in page-fraction units.
+                            val ry = r * (pageWpx / pageHpx)
+                            val victims = currentOverlays.filter { o ->
+                                if (o.kind == AnnKind.PEN) {
+                                    var i = 0
+                                    var hit = false
+                                    while (i + 1 < o.points.size) {
+                                        if (abs(o.points[i] - nx) <= rx &&
+                                            abs(o.points[i + 1] - ny) <= ry
+                                        ) {
+                                            hit = true
+                                            break
+                                        }
+                                        i += 2
+                                    }
+                                    hit
+                                } else {
+                                    nx >= o.left - rx && nx <= o.right + rx &&
+                                        ny >= o.top - ry && ny <= o.bottom + ry
+                                }
+                            }
+                            victims.forEach { currentOnErase(it) }
+                        }
+
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
                             down.consume()
@@ -604,15 +799,17 @@ private fun AnnotatedPage(
                             var changed = false
                             var transformed = false
 
+                            val erasing = currentTool == AnnTool.ERASER
                             val handleNote = currentOverlays.firstOrNull {
                                 it.id == currentSelectedId && it.kind == AnnKind.TEXT
                             }
-                            val onHandle = handleNote != null &&
+                            val onHandle = !erasing && handleNote != null &&
                                 downX >= handleNote.right - handleTolX &&
                                 downY >= handleNote.bottom - handleTolY
                             var resizing = onHandle
-                            val downHit = hitNote(currentOverlays, downX, downY)
+                            val downHit = if (erasing) null else hitNote(currentOverlays, downX, downY)
                             var moving: Overlay? = when {
+                                erasing -> null
                                 onHandle -> handleNote
                                 downHit == null -> null
                                 // The note/move tools always grab a note; a drawing tool only grabs the
@@ -622,10 +819,11 @@ private fun AnnotatedPage(
                                     downHit.id == currentSelectedId -> downHit
                                 else -> null
                             }
-                            if (moving == null && !onHandle && currentTool == AnnTool.MOVE) {
+                            if (moving == null && !onHandle && !erasing && currentTool == AnnTool.MOVE) {
                                 moving = hitShape(currentOverlays, downX, downY)
                             }
                             moving?.let { if (it.kind == AnnKind.TEXT) onSelect(it.id) }
+                            if (erasing) eraseAt(downX, downY)
                             var sketch: Overlay? = null
 
                             while (true) {
@@ -664,6 +862,14 @@ private fun AnnotatedPage(
                                 if (multi) {
                                     multi = false
                                     last = change.position
+                                }
+                                if (erasing) {
+                                    // Eraser: nothing to draw, just rub out whatever is under the
+                                    // finger as it travels. A second finger still zooms (above).
+                                    eraseAt(normX(change.position.x), normY(change.position.y))
+                                    last = change.position
+                                    change.consume()
+                                    continue
                                 }
                                 val dx = change.position.x - last.x
                                 val dy = change.position.y - last.y
@@ -718,7 +924,7 @@ private fun AnnotatedPage(
                             }
 
                             val finished = moving
-                            if (!transformed) {
+                            if (!transformed && !erasing) {
                                 if (finished != null) {
                                     if (changed) {
                                         onUpdate(finished)
@@ -815,11 +1021,16 @@ private fun TextNote(
                 width = with(density) { boxWidth.toDp() },
                 height = with(density) { boxHeight.toDp() },
             )
-            .background(Color(note.color).copy(alpha = 0.16f), RoundedCornerShape(3.dp))
-            .border(
-                width = if (selected) 2.dp else 1.dp,
-                color = if (selected) Color.White else Color(note.color),
-                shape = RoundedCornerShape(3.dp),
+            // No box in the editor either: an unselected note is just its text, so it reads as
+            // part of the page (that is also how it is written into the exported PDF).
+            .then(
+                if (selected) {
+                    Modifier
+                        .background(Color(0x1AFFFFFF), RoundedCornerShape(3.dp))
+                        .border(1.dp, Color(0x99FFFFFF), RoundedCornerShape(3.dp))
+                } else {
+                    Modifier
+                },
             )
             .padding(horizontal = 3.dp, vertical = 1.dp),
     ) {
@@ -835,7 +1046,7 @@ private fun TextNote(
                     .align(Alignment.BottomEnd)
                     .size(14.dp)
                     .background(Color.White, CircleShape)
-                    .border(2.dp, Color(note.color), CircleShape),
+                    .border(2.dp, Color(0xFF8AB4F8), CircleShape),
             )
         }
     }
@@ -885,6 +1096,12 @@ private fun toolToKind(tool: AnnTool): AnnKind = when (tool) {
     AnnTool.UNDERLINE -> AnnKind.UNDERLINE
     AnnTool.STRIKEOUT -> AnnKind.STRIKEOUT
     else -> AnnKind.TEXT
+}
+
+/** True for the tools whose [AnnTool] paints something with the current stroke width. */
+private fun usesStroke(tool: AnnTool): Boolean = when (tool) {
+    AnnTool.PEN, AnnTool.HIGHLIGHT, AnnTool.UNDERLINE, AnnTool.STRIKEOUT -> true
+    else -> false
 }
 
 /** Topmost text note under the given normalized point. */
@@ -964,6 +1181,7 @@ private fun ToolButton(tool: AnnTool, selected: AnnTool, onSelect: (AnnTool) -> 
         AnnTool.HIGHLIGHT -> Icons.Filled.Check
         AnnTool.UNDERLINE -> Icons.Filled.StrikethroughS
         AnnTool.STRIKEOUT -> Icons.Filled.StrikethroughS
+        AnnTool.ERASER -> Icons.Filled.AutoFixNormal
     }
     val label = when (tool) {
         AnnTool.MOVE -> "Move"
@@ -972,6 +1190,7 @@ private fun ToolButton(tool: AnnTool, selected: AnnTool, onSelect: (AnnTool) -> 
         AnnTool.HIGHLIGHT -> "Highlight"
         AnnTool.UNDERLINE -> "Underline"
         AnnTool.STRIKEOUT -> "Strike"
+        AnnTool.ERASER -> "Eraser"
     }
     Row(
         modifier = Modifier

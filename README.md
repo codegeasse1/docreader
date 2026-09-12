@@ -33,6 +33,42 @@ git tag v1.2 && git push origin v1.2
 
 ## Changelog
 
+### 1.5 — annotation polish, auto-hiding reader bars, PDF/image export
+
+- **Export as PDF** and **export as image**: the reader's tools sheet now has
+  *Export as PDF (annotations included)*, *Export this page as an image (PNG)*
+  and *Export all pages as images (PNG)*; the annotation editor has an
+  *Export as PDF* action plus a one-tap page-image export. Every export lands
+  on the preview-before-save screen first (the all-pages export goes to a
+  folder you pick and reports how many images it wrote).
+- **Annotation editor**: white was added to the palette, a **Size** control
+  (−/+/Reset with a live preview) drives the pen, highlighter, underline and
+  strike widths, a new **Eraser** tool rubs out whatever it touches (with its
+  own size control), and text notes are now **boxless** — they read as if they
+  were printed on the page, both in the editor and in the exported PDF.
+- **Reader**: the top and bottom bars hide themselves so they never interrupt
+  reading — tap a page to bring them back, they fade out after 3 s of no
+  interaction, and scrolling hides them without the scroll counting as a tap.
+
+### 1.4 — merge / zoom / note-editor fixes
+- **Merge PDFs** no longer fails with "Could not create the file"
+  (`PDFMergerUtility` in legacy mode, with a manual import fallback) and a
+  failed operation now reports the real reason.
+- The **text-note editor** no longer jitters or shrinks the note as you type;
+  `A+`/`A-`/`Reset` scale the selected note's box and text together, dragging
+  needs an explicit tap-to-select first, and two-finger pinch pans/zooms.
+- **Reader zoom** is smooth: bitmaps re-render only when the zoom crosses a
+  bucket, the previous bitmap stays on screen while the sharper one loads, and
+  panning uses raw deltas.
+
+### 1.3 — preview before saving, and a real page builder
+- Every operation now writes to a cache file and shows a **full-screen preview**
+  (page thumbnails, size, suggested name) with **Save** (only then is the
+  destination picked), **Share** and **Discard**.
+- **New PDF** page builder: blank pages and/or gallery images, reorderable.
+- **Add image pages** appends image pages to an existing PDF.
+- Text notes gained a size (`fontSize`, `A-`/`A+`/`Reset`).
+
 ### 1.2 — "no more dummy UI"
 Every control on every screen is now actually wired; the leftover
 placeholder chrome was removed.
@@ -61,7 +97,10 @@ placeholder chrome was removed.
 - Encrypted PDFs prompt for the password (decrypted through PDFBox first).
 - Recent files + starred files, persistent across launches.
 - Bookmarks (per document), annotation list, in-document **text search with
-  highlights**, text/HTML export.
+  highlights**, text/HTML export, and **export as PDF or as PNG images** (with
+  annotations baked in).
+- The reading chrome (top/bottom bars) auto-hides: tap a page to show it, it
+  fades after 3 s of inactivity and stays hidden while you scroll.
 - Registers for `ACTION_VIEW` on `application/pdf`, so "Open with DocReader"
   works from any file manager.
 
@@ -71,9 +110,10 @@ placeholder chrome was removed.
 
 **Editing** (all use PDFBox-Android)
 - **Annotate**: freehand pen, highlight, underline, strike-through, and
-  draggable/editable text notes, with colour palette, undo, a **Move** tool for
-  repositioning any annotation, and "save as" that bakes the annotations into a
-  real PDF copy.
+  draggable/editable text notes, with colour palette (red/yellow/green/blue/
+  purple/black/**white**), a **Size** control for stroke width, an **Eraser**,
+  undo, a **Move** tool for repositioning any annotation, and an export that
+  bakes the annotations into a real PDF copy (or a PNG per page).
 - **Organize pages**: rotate, reorder, delete, then save; extract a page range;
   split every page into its own file inside a chosen folder.
 - **Merge** several PDFs into one.

@@ -3,6 +3,7 @@ package com.perchance.docreader.ui
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -104,6 +105,7 @@ fun ResultPreview(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val isPdf = mime == "application/pdf"
+    val isImage = mime.startsWith("image/")
 
     val handle = remember(file) {
         if (isPdf) runCatching { PdfDocumentHandle(context, Uri.fromFile(file)) }.getOrNull() else null
@@ -118,8 +120,15 @@ fun ResultPreview(
         value = handle?.let { h -> withContext(Dispatchers.IO) { h.render(pageIndex, 1000) } }
     }
     val text by produceState<String?>(initialValue = null, file, isPdf) {
-        value = if (isPdf) null else withContext(Dispatchers.IO) {
+        value = if (isPdf || isImage) null else withContext(Dispatchers.IO) {
             runCatching { file.readText() }.getOrDefault("")
+        }
+    }
+    val image by produceState<Bitmap?>(initialValue = null, file, isImage) {
+        value = if (isImage) withContext(Dispatchers.IO) {
+            runCatching { BitmapFactory.decodeFile(file.absolutePath) }.getOrNull()
+        } else {
+            null
         }
     }
 
@@ -166,6 +175,20 @@ fun ResultPreview(
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
+                        isImage -> {
+                            val bmp = image
+                            if (bmp == null) {
+                                CircularProgressIndicator()
+                            } else {
+                                Image(
+                                    bitmap = bmp.asImageBitmap(),
+                                    contentDescription = "Image preview",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize().padding(8.dp),
+                                )
+                            }
+                        }
+
                         isPdf -> {
                             val bmp = bitmap
                             if (bmp == null) {
@@ -215,7 +238,13 @@ fun ResultPreview(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             buildString {
-                                append(if (isPdf) "$pageCount page${if (pageCount == 1) "" else "s"}" else "Text export")
+                                append(
+                                    when {
+                                        isPdf -> "$pageCount page${if (pageCount == 1) "" else "s"}"
+                                        isImage -> "Image export"
+                                        else -> "Text export"
+                                    },
+                                )
                                 append("  ·  ")
                                 append(formatSize(file.length()))
                                 append("  ·  ")

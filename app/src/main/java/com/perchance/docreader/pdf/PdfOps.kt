@@ -719,8 +719,6 @@ object PdfOps {
                     val r = max(p1[0], p2[0])
                     val b = min(p1[1], p2[1])
                     val t = max(p1[1], p2[1])
-                    val rect = PDRectangle(l, b, (r - l).coerceAtLeast(1f), (t - b).coerceAtLeast(1f))
-
                     val ann: PDAnnotationMarkup = when (o.kind) {
                         AnnKind.HIGHLIGHT ->
                             PDAnnotationTextMarkup(PDAnnotationTextMarkup.SUB_TYPE_HIGHLIGHT)
@@ -731,12 +729,29 @@ object PdfOps {
                         else -> PDAnnotationMarkup()
                     }
 
+                    // The highlighter can be thicker than the box the user dragged (that is what the
+                    // Size control does), so its quad points are grown symmetrically when needed.
+                    var quadT = t
+                    var quadB = b
+
                     when (o.kind) {
                         AnnKind.TEXT -> {
                             ann.cosObject.setName(COSName.SUBTYPE, PDAnnotationMarkup.SUB_TYPE_FREETEXT)
                             val textSize = (o.fontSize * box.height).coerceIn(4f, 96f)
-                            ann.setDefaultAppearance("/Helv ${String.format(Locale.US, "%.1f", textSize)} Tf 0 g")
+                            // The colour goes into the default-appearance string, and the note gets a
+                            // zero-width border, so it reads as if it were printed on the page
+                            // instead of sitting in a coloured box.
+                            val cr = ((o.color shr 16) and 0xFF) / 255f
+                            val cg = ((o.color shr 8) and 0xFF) / 255f
+                            val cb = (o.color and 0xFF) / 255f
+                            ann.setDefaultAppearance(
+                                "/Helv " + String.format(Locale.US, "%.1f", textSize) + " Tf " +
+                                    String.format(Locale.US, "%.3f %.3f %.3f rg", cr, cg, cb),
+                            )
                             ann.setContents(o.text)
+                            val bs = PDBorderStyleDictionary()
+                            bs.setWidth(0f)
+                            ann.setBorderStyle(bs)
                         }
 
                         AnnKind.PEN -> {
@@ -758,15 +773,34 @@ object PdfOps {
                         }
 
                         else -> {
+                            if (o.kind == AnnKind.HIGHLIGHT) {
+                                val minH = (o.width * box.width * 1.8f).coerceIn(1f, 96f)
+                                if (quadT - quadB < minH) {
+                                    val mid = (quadB + quadT) / 2f
+                                    quadB = mid - minH / 2f
+                                    quadT = mid + minH / 2f
+                                }
+                            }
                             (ann as PDAnnotationTextMarkup)
-                                .setQuadPoints(floatArrayOf(l, t, r, t, l, b, r, b))
+                                .setQuadPoints(floatArrayOf(l, quadT, r, quadT, l, quadB, r, quadB))
                             if (o.text.isNotBlank()) ann.setContents(o.text)
+                            if (o.kind != AnnKind.HIGHLIGHT) {
+                                // Underline / strike use the Size control as their line thickness.
+                                val bs = PDBorderStyleDictionary()
+                                bs.setWidth((o.width * box.width).coerceIn(0.5f, 24f))
+                                ann.setBorderStyle(bs)
+                            }
                         }
                     }
 
+                    val rect = PDRectangle(l, quadB, (r - l).coerceAtLeast(1f), (quadT - quadB).coerceAtLeast(1f))
                     ann.setRectangle(rect)
-                    ann.setColor(rgb(o.color))
-                    if (o.kind != AnnKind.TEXT) ann.setConstantOpacity(0.4f)
+                    if (o.kind != AnnKind.TEXT) {
+                        // For a FreeText annotation /C is the *background* of the text box, so the
+                        // notes must not get one — they have to stay boxless to blend into the page.
+                        ann.setColor(rgb(o.color))
+                        ann.setConstantOpacity(0.4f)
+                    }
                     page.annotations.add(ann)
                     runCatching { ann.constructAppearances(doc) }
                     written++
@@ -778,6 +812,79 @@ object PdfOps {
         }
         return written
     }
+
+    // ---------------------------------------------------------------- image export
+
+    /**
+     * Renders pages of the document to PNG files, with [overlays] baked in when there are any.
+     *
+     * [pages] is 0-based; an empty list means every page. When [folder] is true [dest] is a folder
+     * picked through the SAF (one `name-pageN.png` per page), otherwise [dest] is a single `.png`
+     * file and only the first entry of [pages] is written. Returns how many images were written.
+     */
+    fun exportImages(
+        ctx: Context,
+        uri: Uri,
+        overlays: List<Overlay>,
+        password: String?,
+        pages: List<Int>,
+        targetWidth: Int,
+        dest: Uri,
+        folder: Boolean,
+        baseName: String,
+        onProgress: ((Int, Int) -> Unit)? = null,
+    ): Int {
+        var baked: File? = null
+        var handle: PdfDocumentHandle? = null
+        try {
+            val src = if (overlays.isEmpty()) {
+                uri
+            } else {
+                // Render from a temporary copy that already has the annotations in it.
+                val f = File.createTempFile("docreader_img_", ".pdf", ctx.cacheDir)
+                writeAnnotations(ctx, uri, overlays, password, Uri.fromFile(f))
+                baked = f
+                Uri.fromFile(f)
+            }
+            handle = PdfDocumentHandle(ctx, src, password)
+            val wanted = (if (pages.isEmpty()) (0 until handle.pageCount).toList() else pages)
+                .filter { it >= 0 && it < handle.pageCount }
+            var written = 0
+            wanted.forEachIndexed { i, page ->
+                onProgress?.invoke(i + 1, wanted.size)
+                val bmp = handle.render(page, targetWidth.coerceIn(200, 4000)) ?: return@forEachIndexed
+                val png = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, png)
+                val bytes = png.toByteArray()
+                val stem = baseName.ifBlank { "page" }.take(60)
+                val fileName = if (wanted.size == 1) "$stem.png" else "$stem-page${page + 1}.png"
+                val ok = if (folder) {
+                    writeImageToFolder(ctx, dest, fileName, bytes)
+                } else {
+                    runCatching {
+                        ctx.contentResolver.openOutputStream(dest)?.use { it.write(bytes) } != null
+                    }.getOrDefault(false)
+                }
+                if (ok) written++
+            }
+            return written
+        } finally {
+            handle?.close()
+            baked?.delete()
+        }
+    }
+
+    /**
+     * Writes a PNG into a folder the user picked. [DocumentFile] keeps an existing file when the
+     * name is taken by appending a number instead of clobbering it.
+     */
+    private fun writeImageToFolder(ctx: Context, tree: Uri, name: String, bytes: ByteArray): Boolean =
+        runCatching {
+            val dir = DocumentFile.fromTreeUri(ctx, tree)
+            val doc = dir?.createFile("image/png", name)
+            val out = doc?.let { ctx.contentResolver.openOutputStream(it.uri) }
+            if (out == null) false else out.use { stream -> stream.write(bytes); true }
+        }.getOrDefault(false)
 
     /** Draws [stamp] (usually a signature) onto a page over a display-space rectangle. */
     fun stampImage(

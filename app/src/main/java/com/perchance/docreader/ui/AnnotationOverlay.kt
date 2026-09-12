@@ -59,11 +59,16 @@ private fun DrawScope.drawAnnotation(
     val stroke = (o.width * size.width).coerceIn(1f, 40f)
 
     when (o.kind) {
-        AnnKind.HIGHLIGHT -> drawRect(
-            color = color.copy(alpha = 0.35f),
-            topLeft = Offset(left, top),
-            size = Size(width, height),
-        )
+        AnnKind.HIGHLIGHT -> {
+            // A highlighter is a band: a thin drag is grown to the thickness the Size control asks
+            // for, so the size setting always does something visible.
+            val band = maxOf(height, (stroke * 1.8f).coerceIn(2f, 96f))
+            drawRect(
+                color = color.copy(alpha = 0.35f),
+                topLeft = Offset(left, top + (height - band) / 2f),
+                size = Size(width, band),
+            )
+        }
 
         AnnKind.UNDERLINE -> drawLine(
             color = color,
@@ -102,11 +107,7 @@ private fun DrawScope.drawAnnotation(
         }
 
         AnnKind.TEXT -> {
-            drawRect(
-                color = color.copy(alpha = if (active) 0.25f else 0.12f),
-                topLeft = Offset(left, top),
-                size = Size(width, height),
-            )
+            // No box: the note is just its text, so it reads as if it were printed on the page.
             if (o.text.isNotBlank()) {
                 drawText(
                     textMeasurer = measurer,
@@ -121,7 +122,7 @@ private fun DrawScope.drawAnnotation(
         }
     }
 
-    if (active) {
+    if (active && o.kind != AnnKind.TEXT) {
         drawRect(
             color = color,
             topLeft = Offset(left, top),

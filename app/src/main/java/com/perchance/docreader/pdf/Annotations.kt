@@ -32,9 +32,19 @@ data class Overlay(
 /** Default text-note height, as a fraction of the page height. */
 const val DEFAULT_TEXT_SIZE = 0.05f
 
-/** Smallest / largest text-note height (fraction of the page height) the pinch gesture allows. */
+/** Smallest / largest text-note height (fraction of the page height) the buttons allow. */
 const val MIN_TEXT_SIZE = 0.012f
 const val MAX_TEXT_SIZE = 0.24f
+
+/** Stroke width for the pen / highlighter / underline / strike tools, as a fraction of page width. */
+const val DEFAULT_STROKE_WIDTH = 0.02f
+const val MIN_STROKE_WIDTH = 0.004f
+const val MAX_STROKE_WIDTH = 0.14f
+
+/** Eraser radius, as a fraction of the page width. */
+const val DEFAULT_ERASER_SIZE = 0.05f
+const val MIN_ERASER_SIZE = 0.015f
+const val MAX_ERASER_SIZE = 0.30f
 
 /** Preset colours shown in the annotation toolbar (WPS-style palette). */
 val ANNOTATION_COLORS = listOf(
@@ -44,4 +54,5 @@ val ANNOTATION_COLORS = listOf(
     0xFF1E88E5, // blue
     0xFF8E24AA, // purple
     0xFF000000, // black
+    0xFFFFFFFF, // white
 )

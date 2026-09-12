@@ -5,6 +5,11 @@ package com.perchance.docreader.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,6 +25,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -53,6 +59,8 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -84,11 +92,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -110,8 +120,10 @@ import com.perchance.docreader.pdf.SearchHit
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 private val PREVIEW_BG = Color(0xFF3A3A3A)
 
@@ -252,6 +264,9 @@ fun ReaderScreen(
         runCatching { listState.dispatchRawDelta(-pan.y) }
     }
 
+    /** Middle of the visible page area, used as the focal point for the +/- zoom buttons. */
+    fun viewportCenter() = Offset(viewportSize.width / 2f, viewportSize.height / 2f)
+
     val currentPage = listState.firstVisibleItemIndex.coerceIn(0, (handle.pageCount - 1).coerceAtLeast(0))
 
     var showTools by remember { mutableStateOf(false) }
@@ -261,6 +276,36 @@ fun ReaderScreen(
     var showAnnotations by remember { mutableStateOf(false) }
     var goToPage by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState()
+
+    // Reading chrome: the top and bottom bars slide away on their own so nothing interrupts the
+    // page. A tap toggles them back; scrolling hides them (and never counts as a tap, so a drag
+    // cannot bring them back).
+    var chromeVisible by remember { mutableStateOf(true) }
+    var chromeEpoch by remember { mutableStateOf(0) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    var export by remember { mutableStateOf<ExportResult?>(null) }
+    val anySheetOpen = showTools || showThumbnails || showSearch || showBookmarks ||
+        showAnnotations || goToPage
+
+    fun showChrome() {
+        chromeVisible = true
+        chromeEpoch++
+    }
+
+    fun toggleChrome() {
+        if (chromeVisible) chromeVisible = false else showChrome()
+    }
+
+    LaunchedEffect(chromeVisible, chromeEpoch, anySheetOpen) {
+        if (chromeVisible && !anySheetOpen) {
+            delay(3000)
+            chromeVisible = false
+        }
+    }
+
+    LaunchedEffect(listState.isScrollInProgress, hScroll.isScrollInProgress) {
+        if (listState.isScrollInProgress || hScroll.isScrollInProgress) chromeVisible = false
+    }
 
     var hits by remember(uri) { mutableStateOf<List<SearchHit>>(emptyList()) }
     var activeHits by remember(uri) { mutableStateOf<List<SearchHit>>(emptyList()) }
@@ -315,79 +360,125 @@ fun ReaderScreen(
         }
     }
 
-    Scaffold(
-        containerColor = PREVIEW_BG,
-        topBar = {
-            TopAppBar(
-                title = { Text(name, maxLines = 1, fontSize = 15.sp) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-                actions = {
-                    val bookmarked = bookmarks.any { it.page == currentPage }
-                    IconButton(onClick = {
-                        bookmarkStore.toggle(uri, currentPage, "Page ${currentPage + 1}")
-                        reloadKey++
-                    }) {
-                        Icon(
-                            if (bookmarked) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                            contentDescription = "Bookmark",
-                            tint = if (bookmarked) Color(0xFFF9A825) else Color.Unspecified,
+    /**
+     * Writes the document — with the annotations baked in — to a temporary file and shows it, so
+     * the result is visible before the user is asked where to save it.
+     */
+    fun exportPdf() {
+        scope.launch {
+            busy = "Preparing the PDF…"
+            val out = withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File.createTempFile("docreader_pdf_", ".pdf", context.cacheDir)
+                    if (overlays.isEmpty() && !encrypted) {
+                        val input = context.contentResolver.openInputStream(documentUri)
+                            ?: error("Could not read the document")
+                        input.use { stream -> f.outputStream().use { stream.copyTo(it) } }
+                    } else if (overlays.isEmpty()) {
+                        // A protected document is decrypted on the way out, so the preview and any
+                        // other app can open the exported copy.
+                        PdfOps.removePassword(context, documentUri, password, Uri.fromFile(f))
+                    } else {
+                        PdfOps.writeAnnotations(
+                            context,
+                            documentUri,
+                            overlays,
+                            password,
+                            Uri.fromFile(f),
                         )
                     }
-                    IconButton(onClick = { showSearch = true }) {
-                        Icon(Icons.Filled.Search, contentDescription = "Search")
-                    }
-                    IconButton(onClick = { share() }) {
-                        Icon(Icons.Filled.Share, contentDescription = "Share")
-                    }
-                    IconButton(onClick = onOpenFileMenu) {
-                        Icon(Icons.Filled.MoreVert, contentDescription = "File menu")
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .background(Color(0xCC000000), RoundedCornerShape(20.dp))
-                        .clickable { goToPage = true }
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                ) {
-                    Text("${currentPage + 1}/${handle.pageCount}", color = Color.White, fontSize = 12.sp)
-                }
-                Spacer(Modifier.width(8.dp))
-                IconButton(onClick = { showThumbnails = true }) {
-                    Icon(Icons.Filled.GridView, contentDescription = "Thumbnails", tint = Color.White)
-                }
-                Spacer(Modifier.weight(1f))
-                val center = Offset(viewportSize.width / 2f, viewportSize.height / 2f)
-                IconButton(onClick = { applyZoom(zoom / 1.25f, center) }) {
-                    Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out", tint = Color.White)
-                }
-                IconButton(onClick = { applyZoom(zoom * 1.25f, center) }) {
-                    Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in", tint = Color.White)
-                }
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .background(Color(0xFFC62828), CircleShape)
-                        .clickable { showTools = true },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Filled.Edit, contentDescription = "Tools", tint = Color.White)
-                }
+                    f
+                }.getOrNull()
             }
-        },
-    ) { padding ->
+            busy = null
+            if (out == null || out.length() == 0L) {
+                out?.delete()
+                notice = "Could not export this document as a PDF."
+            } else {
+                export = ExportResult(
+                    file = out,
+                    title = "PDF export",
+                    name = if (name.endsWith(".pdf", ignoreCase = true)) name else "$name.pdf",
+                    note = if (overlays.isEmpty()) {
+                        "Original document"
+                    } else {
+                        "${overlays.size} annotation${if (overlays.size == 1) "" else "s"} included"
+                    },
+                )
+            }
+        }
+    }
+
+    /** Renders one page (annotations included) to a temporary PNG and previews it. */
+    fun exportPageImage(page: Int) {
+        scope.launch {
+            busy = "Rendering page ${page + 1} as an image…"
+            val out = withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File.createTempFile("docreader_png_", ".png", context.cacheDir)
+                    val written = PdfOps.exportImages(
+                        ctx = context,
+                        uri = documentUri,
+                        overlays = overlays,
+                        password = password,
+                        pages = listOf(page),
+                        targetWidth = 1600,
+                        dest = Uri.fromFile(f),
+                        folder = false,
+                        baseName = name.substringBeforeLast('.'),
+                    )
+                    if (written <= 0) error("Could not render the page")
+                    f
+                }.getOrNull()
+            }
+            busy = null
+            if (out == null || out.length() == 0L) {
+                out?.delete()
+                notice = "Could not export this page as an image."
+            } else {
+                export = ExportResult(
+                    file = out,
+                    title = "Page image",
+                    name = "${name.substringBeforeLast('.')}_page${page + 1}.png",
+                    mime = "image/png",
+                    note = "Page ${page + 1} of ${handle.pageCount}",
+                )
+            }
+        }
+    }
+
+    /** Picks a folder, then writes every page (annotations included) into it as a PNG. */
+    val pickImageFolder = rememberPickFolder { tree ->
+        scope.launch {
+            busy = "Exporting images…"
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    PdfOps.exportImages(
+                        ctx = context,
+                        uri = documentUri,
+                        overlays = overlays,
+                        password = password,
+                        pages = emptyList(),
+                        targetWidth = 1600,
+                        dest = tree,
+                        folder = true,
+                        baseName = name.substringBeforeLast('.'),
+                        onProgress = { done, total ->
+                            scope.launch { busy = "Exporting image $done/$total…" }
+                        },
+                    )
+                }.getOrDefault(-1)
+            }
+            busy = null
+            notice = if (written <= 0) {
+                "Could not export the pages as images."
+            } else {
+                "Exported $written image${if (written == 1) "" else "s"} to the folder you chose."
+            }
+        }
+    }
+
+    Scaffold(containerColor = PREVIEW_BG) { padding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -433,7 +524,7 @@ fun ReaderScreen(
                             renderPx = bitmapWidth,
                             overlays = overlays.filter { it.page == index },
                             searchHits = hitOverlays.filter { it.page == index },
-                            onClick = { showTools = true },
+                            onClick = { toggleChrome() },
                         )
                         Spacer(Modifier.height(with(density) { (gapBasePx * zoom).toDp() }))
                     }
@@ -441,6 +532,53 @@ fun ReaderScreen(
             }
             BusyOverlay(busy)
             if (searching) BusyOverlay("Searching…")
+
+            // The bars float over the page (no content re-flow, no jump when they slide away).
+            AnimatedVisibility(
+                visible = chromeVisible,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .clipToBounds()
+                    .pointerInput(Unit) { keepChromeAlive { chromeEpoch++ } },
+            ) {
+                ReaderTopBar(
+                    title = name,
+                    bookmarked = bookmarks.any { it.page == currentPage },
+                    onBack = onBack,
+                    onToggleBookmark = {
+                        bookmarkStore.toggle(uri, currentPage, "Page ${currentPage + 1}")
+                        reloadKey++
+                    },
+                    onSearch = { showSearch = true },
+                    onShare = { share() },
+                    onFileMenu = onOpenFileMenu,
+                )
+            }
+
+            AnimatedVisibility(
+                visible = chromeVisible,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .clipToBounds()
+                    .pointerInput(Unit) { keepChromeAlive { chromeEpoch++ } },
+            ) {
+                ReaderBottomBar(
+                    currentPage = currentPage,
+                    pageCount = handle.pageCount,
+                    zoom = zoom,
+                    onGoToPage = { goToPage = true },
+                    onThumbnails = { showThumbnails = true },
+                    onZoomOut = { applyZoom(zoom / 1.25f, viewportCenter()) },
+                    onZoomIn = { applyZoom(zoom * 1.25f, viewportCenter()) },
+                    onTools = { showTools = true },
+                )
+            }
         }
     }
 
@@ -467,6 +605,18 @@ fun ReaderScreen(
             Spacer(Modifier.height(8.dp))
             HorizontalDivider()
             SheetRow(Icons.Filled.Bookmark, "Bookmarks") { showTools = false; showBookmarks = true }
+            SheetRow(Icons.Filled.PictureAsPdf, "Export as PDF (annotations included)") {
+                showTools = false
+                exportPdf()
+            }
+            SheetRow(Icons.Filled.Photo, "Export this page as an image (PNG)") {
+                showTools = false
+                exportPageImage(currentPage)
+            }
+            SheetRow(Icons.Filled.GridView, "Export all pages as images (PNG)") {
+                showTools = false
+                pickImageFolder.launch(null)
+            }
             SheetRow(Icons.Filled.List, "Export text (.txt)") { showTools = false; exportTxt.launch("${name.substringBeforeLast('.')}.txt") }
             SheetRow(Icons.Filled.Info, "Export HTML (.html)") { showTools = false; exportHtml.launch("${name.substringBeforeLast('.')}.html") }
             Spacer(Modifier.height(24.dp))
@@ -599,6 +749,142 @@ fun ReaderScreen(
             },
             onDismiss = { goToPage = false },
         )
+    }
+
+    export?.let { result ->
+        ResultPreview(
+            file = result.file,
+            title = result.title,
+            suggestedName = result.name,
+            mime = result.mime,
+            note = result.note,
+            onDiscard = {
+                runCatching { result.file.delete() }
+                export = null
+            },
+        )
+    }
+
+    notice?.let { message ->
+        AlertDialog(
+            onDismissRequest = { notice = null },
+            title = { Text("Export") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { notice = null }) { Text("OK") } },
+        )
+    }
+}
+
+/** A finished export waiting to be previewed and saved. */
+private data class ExportResult(
+    val file: File,
+    val title: String,
+    val name: String,
+    val mime: String = "application/pdf",
+    val note: String? = null,
+)
+
+/** A finger landing on a bar restarts its auto-hide timer, so the chrome stays while in use. */
+private suspend fun PointerInputScope.keepChromeAlive(bump: () -> Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.changes.any { it.pressed && !it.previousPressed }) bump()
+        }
+    }
+}
+
+/** The reader's top bar. [windowInsets] is zeroed because the parent already applies them. */
+@Composable
+private fun ReaderTopBar(
+    title: String,
+    bookmarked: Boolean,
+    onBack: () -> Unit,
+    onToggleBookmark: () -> Unit,
+    onSearch: () -> Unit,
+    onShare: () -> Unit,
+    onFileMenu: () -> Unit,
+) {
+    TopAppBar(
+        title = { Text(title, maxLines = 1, fontSize = 15.sp) },
+        windowInsets = WindowInsets(0, 0, 0, 0),
+        navigationIcon = {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+            }
+        },
+        actions = {
+            IconButton(onClick = onToggleBookmark) {
+                Icon(
+                    if (bookmarked) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
+                    contentDescription = "Bookmark",
+                    tint = if (bookmarked) Color(0xFFF9A825) else Color.Unspecified,
+                )
+            }
+            IconButton(onClick = onSearch) {
+                Icon(Icons.Filled.Search, contentDescription = "Search")
+            }
+            IconButton(onClick = onShare) {
+                Icon(Icons.Filled.Share, contentDescription = "Share")
+            }
+            IconButton(onClick = onFileMenu) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "File menu")
+            }
+        },
+    )
+}
+
+/** The reader's bottom bar: page number, thumbnails, zoom and the tools sheet. */
+@Composable
+private fun ReaderBottomBar(
+    currentPage: Int,
+    pageCount: Int,
+    zoom: Float,
+    onGoToPage: () -> Unit,
+    onThumbnails: () -> Unit,
+    onZoomOut: () -> Unit,
+    onZoomIn: () -> Unit,
+    onTools: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .background(Color(0xCC000000), RoundedCornerShape(20.dp))
+                .clickable { onGoToPage() }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            Text("${currentPage + 1}/$pageCount", color = Color.White, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(8.dp))
+        IconButton(onClick = onThumbnails) {
+            Icon(Icons.Filled.GridView, contentDescription = "Thumbnails", tint = Color.White)
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            if (zoom > 1.005f) "${(zoom * 100).roundToInt()}%" else "fit",
+            color = Color(0xCCFFFFFF),
+            fontSize = 11.sp,
+        )
+        IconButton(onClick = onZoomOut) {
+            Icon(Icons.Filled.ZoomOut, contentDescription = "Zoom out", tint = Color.White)
+        }
+        IconButton(onClick = onZoomIn) {
+            Icon(Icons.Filled.ZoomIn, contentDescription = "Zoom in", tint = Color.White)
+        }
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .background(Color(0xFFC62828), CircleShape)
+                .clickable { onTools() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Filled.Edit, contentDescription = "Tools", tint = Color.White)
+        }
     }
 }
 

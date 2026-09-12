@@ -177,15 +177,22 @@ fun HomeScreen(
                 else -> ".html"
             }
             val out = File.createTempFile("docreader_result_", suffix, context.cacheDir)
-            val ok = withContext(Dispatchers.IO) { runCatching { op(Uri.fromFile(out)) }.isSuccess }
+            val outcome = withContext(Dispatchers.IO) { runCatching { op(Uri.fromFile(out)) } }
             busy = null
-            if (ok && out.length() > 0L) {
+            val failure = outcome.exceptionOrNull()
+            if (failure == null && out.length() > 0L) {
                 pendingTitle = title
                 pendingSuggested = suggested
                 pendingMime = mime
                 pendingResult.value = out
             } else {
-                notify("Could not create the file")
+                runCatching { out.delete() }
+                val reason = failure?.message?.takeIf { it.isNotBlank() }
+                    ?: failure?.javaClass?.simpleName
+                notify(
+                    if (reason != null) "Could not create the file — $reason"
+                    else "Could not create the file (the result was empty)"
+                )
             }
         }
     }
